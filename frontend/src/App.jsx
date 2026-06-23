@@ -50,8 +50,12 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requirement, max_dev_tasks: 2 }),
       })
-      if (!res.ok) throw new Error('Server ne ' + res.status + ' diya')
       const json = await res.json()
+      // Backend ab error par {success:false, message:...} bhejta hai
+      if (!json.success) {
+        setError(json.message || `Server error (${res.status})`)
+        return
+      }
       setResult(json.data)
     } catch (e) {
       setError('Error: ' + e.message + ' — backend chal raha hai? (port 8000)')

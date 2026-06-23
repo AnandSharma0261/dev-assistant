@@ -58,8 +58,12 @@ def health():
 @app.post("/plan")
 def plan(body: RequirementIn):
     """Sirf Planner chalata hai (halka/sasta) — requirement se tasks deta hai."""
-    result = make_plan(body.requirement)
-    return {"success": True, "data": result}
+    try:
+        result = make_plan(body.requirement)
+        return {"success": True, "data": result}
+    except Exception as e:
+        # Error ko crash banane ki jagah saaf message do (CORS header ke saath jaayega)
+        return {"success": False, "message": str(e)}
 
 
 @app.post("/generate")
@@ -68,12 +72,14 @@ def generate(body: RequirementIn):
     POORI crew chalata hai (Planner -> Architect -> Developer(RAG) -> Reviewer -> QA).
     NOTE: ye bhaari hai — kai AI calls karta hai, time lagta hai.
     """
-    result = run_crew(body.requirement, max_dev_tasks=body.max_dev_tasks)
-
-    # Phase 8: result ko database mein permanently save karo
-    project_id = save_project(body.requirement, result)
-
-    return {"success": True, "project_id": project_id, "data": result}
+    try:
+        result = run_crew(body.requirement, max_dev_tasks=body.max_dev_tasks)
+        # Phase 8: result ko database mein permanently save karo
+        project_id = save_project(body.requirement, result)
+        return {"success": True, "project_id": project_id, "data": result}
+    except Exception as e:
+        # Error ko crash banane ki jagah saaf message do (CORS header ke saath jaayega)
+        return {"success": False, "message": str(e)}
 
 
 # ---- History endpoints (Phase 8) ----

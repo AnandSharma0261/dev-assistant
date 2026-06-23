@@ -22,10 +22,15 @@ if not _api_key:
 # Gemini tak pahunchne ka darwaza
 client = genai.Client(api_key=_api_key)
 
-# Kaunsa model use karna hai.
-# gemini-2.5-flash-lite = is key par sabse zyada free quota wala model (probe karke pata kiya).
-# NOTE: model badalna ho to bas yahi ek line change karo — poora project switch ho jaayega.
-MODEL = "gemini-2.5-flash-lite"
+# Free models ki LIST (fallback order). Pehla try hoga; agar uska daily quota
+# khatam (429) ho jaaye to system APNE AAP agle model par switch kar jaayega.
+# Isse effective quota badh jaata hai (har model ka alag free limit hota hai).
+MODELS = [
+    "gemini-2.5-flash-lite",   # sabse halka — pehle ye
+    "gemini-2.5-flash",        # iska bhi apna alag quota
+    "gemini-2.0-flash",        # extra fallback (kuch keys par available)
+    "gemini-2.0-flash-lite",   # aur ek fallback
+]
 
 
 def _generate(prompt, system_instruction=None, as_json=False, retries=6):
@@ -42,24 +47,41 @@ def _generate(prompt, system_instruction=None, as_json=False, retries=6):
         response_mime_type="application/json" if as_json else None,
     )
 
-    for attempt in range(1, retries + 1):
-        try:
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=prompt,
-                config=config,
-            )
-            return response.text
-        except Exception as e:
-            # Aakhri koshish bhi fail ho gayi to error dikha do
-            if attempt == retries:
-                raise SystemExit(
-                    f"❌ {retries} baar try kiya par Gemini se jawab nahi aaya.\nError: {e}"
+    last_err = None
+
+    # ---- Har model ko bari-bari try karo (FAILOVER) ----
+    for model in MODELS:
+        for attempt in range(1, retries + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=config,
                 )
-            # Warna thoda ruk kar dobara try karo (har baar thoda zyada wait)
-            wait = attempt * 2
-            print(f"⚠️  Gemini busy (attempt {attempt}/{retries}). {wait}s baad retry...")
-            time.sleep(wait)
+                return response.text  # mil gaya — yahीं return
+            except Exception as e:
+                last_err = e
+                msg = str(e)
+
+                # Daily quota khatam (429) ya model unavailable (404):
+                # is model par retry bekaar — seedha AGLE model par switch karo
+                if any(x in msg for x in ("RESOURCE_EXHAUSTED", "429", "404", "NOT_FOUND")):
+                    print(f"⚠️  '{model}' ka quota khatam/unavailable — agle model par switch...")
+                    break  # inner loop tod do -> agla model
+
+                # Warna transient error (503 busy) — thoda ruk kar SAME model retry
+                if attempt == retries:
+                    print(f"⚠️  '{model}' se jawab nahi mila, agla model try karte hain...")
+                    break
+                wait = attempt * 2
+                print(f"⚠️  '{model}' busy (attempt {attempt}/{retries}). {wait}s baad retry...")
+                time.sleep(wait)
+
+    # Saare models fail/exhausted ho gaye
+    raise RuntimeError(
+        "Saare free Gemini models ka aaj ka quota khatam ho gaya (ya unavailable). "
+        f"Kal reset hoga, ya nayi API key use karo. Aakhri error: {last_err}"
+    )
 
 
 def ask_gemini(prompt, system_instruction=None):
