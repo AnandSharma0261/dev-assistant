@@ -1,0 +1,8 @@
+# Ye cheezein container image mein NAHI jaayengi (image halka + secure rahe)
+venv/
+__pycache__/
+*.pyc
+chroma_db/
+app.db
+output/
+.env

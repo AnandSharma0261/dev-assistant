@@ -1,0 +1,22 @@
+# Python
+backend/venv/
+__pycache__/
+*.pyc
+
+# ChromaDB (generated vector database — code se dobara ban jaata hai)
+backend/chroma_db/
+
+# SQLite database file (data — repo mein nahi jaata)
+backend/app.db
+
+# Secrets — ye kabhi kisi ke saath share/upload nahi karte
+.env
+backend/.env
+
+# Node / React
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# OS
+.DS_Store

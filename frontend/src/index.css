@@ -1,0 +1,41 @@
+/* ============================================================
+   Global theme — "Midnight IDE" (dark, violet/blue, dev-feel)
+   ============================================================ */
+
+:root {
+  --bg: #0a0c12;
+  --panel: rgba(255, 255, 255, 0.035);   /* glassy card bg */
+  --panel-2: rgba(255, 255, 255, 0.02);
+  --border: rgba(139, 92, 246, 0.18);     /* halki violet border */
+  --border-strong: rgba(139, 92, 246, 0.55);
+  --text: #c9d1e0;
+  --text-dim: #717a90;
+  --text-bright: #e9eefb;
+  --violet: #8b5cf6;
+  --blue: #3b82f6;
+  --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: var(--sans);
+  background-color: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  line-height: 1.6;
+  /* do soft radial glows — depth/premium feel */
+  background-image:
+    radial-gradient(55vw 55vh at 12% -10%, rgba(139, 92, 246, 0.20), transparent 60%),
+    radial-gradient(50vw 50vh at 100% 0%, rgba(59, 130, 246, 0.16), transparent 55%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 10px; }
+::-webkit-scrollbar-thumb { background: #2a2f45; border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: #3a4060; }
+::-webkit-scrollbar-track { background: transparent; }
+
+::selection { background: rgba(139, 92, 246, 0.35); color: #fff; }

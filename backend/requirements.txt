@@ -1,0 +1,16 @@
+# Multi-Agent Dev Assistant — Python dependencies
+# Install: venv/bin/pip install -r requirements.txt
+
+# --- LLM (Gemini se baat) ---
+google-genai        # Google Gemini ka official SDK
+python-dotenv       # .env se secret keys padhne ke liye
+
+# --- Agents / Orchestration (Phase 4) ---
+crewai              # multi-agent framework (Agent/Task/Crew)
+
+# --- RAG / Vector DB (Phase 5) ---
+chromadb            # local vector database (semantic search)
+
+# --- Backend API (Phase 6) ---
+fastapi             # web API framework
+uvicorn[standard]   # FastAPI app ko chalane wala server (engine)
