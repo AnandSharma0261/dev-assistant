@@ -14,3 +14,6 @@ chromadb            # local vector database (semantic search)
 # --- Backend API (Phase 6) ---
 fastapi             # web API framework
 uvicorn[standard]   # FastAPI app ko chalane wala server (engine)
+
+# --- Database (Phase 8) ---
+sqlalchemy          # ORM — Python class <-> database table
