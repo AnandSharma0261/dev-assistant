@@ -147,6 +147,7 @@ async def run_crew(requirement, max_dev_tasks=2, on_event=None):
                 language=backend_lang,
                 standards=standards,
                 design_context=design_context,
+                other_tasks=[o.title for o in dev_tasks if o is not t],
                 on_text=crew.code_stream("developer", index, t.title),
             )
         output = {"task": t.title, **out.model_dump()}   # task, language, filename, code, notes

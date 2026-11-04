@@ -15,7 +15,8 @@ _TMP = tempfile.mkdtemp(prefix="devassistant-tests-")
 os.environ["GEMINI_API_KEY"] = "test-key"
 os.environ["CHROMA_PATH"] = os.path.join(_TMP, "chroma")
 os.environ["DATA_DIR"] = os.path.join(_TMP, "data")
-os.environ["DATABASE_URL"] = f"sqlite:///{os.path.join(_TMP, 'test.db')}"
+# TEST_DATABASE_URL runs the suite against another database (e.g. Postgres)
+os.environ["DATABASE_URL"] = os.getenv("TEST_DATABASE_URL") or f"sqlite:///{os.path.join(_TMP, 'test.db')}"
 os.environ.pop("GEMINI_MODELS", None)
 
 import pytest  # noqa: E402
@@ -26,6 +27,8 @@ import rag  # noqa: E402
 import schemas as s  # noqa: E402
 
 USAGE = SimpleNamespace(prompt_token_count=100, candidates_token_count=50, thoughts_token_count=None)
+SESSION = "test-session-aaaaaaaaaaaa"
+OTHER_SESSION = "test-session-bbbbbbbbbbbb"
 RAW_PREVIEW = "```html\n<!DOCTYPE html><html><head></head><body>hi</body></html>\n```"
 
 

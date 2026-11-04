@@ -1,9 +1,6 @@
 import { useRef, useState } from 'react'
-import { motion } from 'framer-motion'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
-import { codeStyle } from '../code'
-import { item } from '../motion'
+import { SyntaxHighlighter, oneDark } from '../highlight'
+import { codeStyle, codeTagProps } from '../code'
 
 // Generated prototypes are untrusted code. On top of the iframe sandbox
 // (no allow-same-origin => opaque origin: no access to our cookies, storage
@@ -20,49 +17,62 @@ function withCsp(html) {
     : `${meta}${html}`
 }
 
+const DEVICES = [
+  { key: 'desktop', label: 'Desktop', width: '100%' },
+  { key: 'tablet', label: 'Tablet', width: '768px' },
+  { key: 'mobile', label: 'Mobile', width: '390px' },
+]
+
 /** Runs the Preview agent's HTML in a locked-down iframe; shows the HTML while it streams. */
-export default function LivePreview({ html, streaming, children }) {
+export default function LivePreview({ html, streaming }) {
   const [showCode, setShowCode] = useState(false)
+  const [device, setDevice] = useState('desktop')
+  const [reloadKey, setReloadKey] = useState(0)
   const frameRef = useRef(null)
   const live = streaming != null
+  const width = DEVICES.find((d) => d.key === device).width
 
   return (
-    <motion.section className="card" variants={item}>
-      <div className="preview-head">
-        <h2>
-          <span className="h-mark">▸</span> Live Preview
-          {live && <span className="live-tag">● {html ? 'updating…' : 'writing…'}</span>}
-        </h2>
-        {!live && html && (
-          <div className="preview-actions">
-            <button className="btn-ghost" onClick={() => setShowCode((v) => !v)}>
-              {showCode ? 'Preview' : 'Code'}
-            </button>
-            <button className="btn-ghost" onClick={() => frameRef.current?.requestFullscreen?.()}>
-              Full screen
-            </button>
-          </div>
+    <div className="preview">
+      <div className="toolbar">
+        {live ? (
+          <span className="live-tag">● {html ? 'updating prototype…' : 'writing prototype…'}</span>
+        ) : (
+          <>
+            <div className="segmented" role="radiogroup" aria-label="Preview size">
+              {DEVICES.map((d) => (
+                <button key={d.key} role="radio" aria-checked={device === d.key}
+                  className={device === d.key ? 'active' : ''} onClick={() => setDevice(d.key)}>
+                  {d.label}
+                </button>
+              ))}
+            </div>
+            <div className="toolbar-actions">
+              <button className="btn-ghost btn-sm" onClick={() => setReloadKey((k) => k + 1)}>Reload</button>
+              <button className="btn-ghost btn-sm" onClick={() => setShowCode((v) => !v)}>{showCode ? 'Preview' : 'HTML'}</button>
+              <button className="btn-ghost btn-sm" onClick={() => frameRef.current?.requestFullscreen?.()}>Full screen</button>
+            </div>
+          </>
         )}
       </div>
       {live || showCode ? (
-        <div className="preview-code">
-          <SyntaxHighlighter language="markup" style={oneDark} customStyle={codeStyle}>
-            {(live ? streaming : html) + (live ? '▍' : '')}
-          </SyntaxHighlighter>
-        </div>
+        <SyntaxHighlighter language="markup" style={oneDark} customStyle={codeStyle} codeTagProps={codeTagProps}>
+          {(live ? streaming : html) + (live ? '▍' : '')}
+        </SyntaxHighlighter>
       ) : (
-        <iframe
-          ref={frameRef}
-          className="preview-frame"
-          title="Generated app preview"
-          sandbox="allow-scripts allow-modals"
-          srcDoc={withCsp(html)}
-        />
+        <div className="preview-stage">
+          <iframe
+            key={reloadKey}
+            ref={frameRef}
+            className="preview-frame"
+            style={{ width }}
+            title="Generated app preview"
+            sandbox="allow-scripts allow-modals"
+            srcDoc={withCsp(html)}
+          />
+        </div>
       )}
-      <p className="dim preview-note">
-        Prototype runs in a sandbox: no network, no backend, data lives in memory.
-      </p>
-      {children}
-    </motion.section>
+      <p className="dim small">Runs in a sandbox: no network, no backend; data lives in memory.</p>
+    </div>
   )
 }

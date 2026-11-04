@@ -24,7 +24,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from crew import refine_run, run_crew
-from database import create_run, get_run, update_run
+from database import create_run, get_run, run_owner, update_run
 from gemini_helper import LLMUnavailable
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,7 @@ class Run:
     requirement: str
     parent_id: str | None = None
     instruction: str | None = None
+    session_id: str | None = None   # owner (not exposed in snapshots)
     status: str = "queued"          # queued | running | done | failed | cancelled
     events: list = field(default_factory=list)
     result: dict | None = None
@@ -98,14 +99,18 @@ class RunStore:
         run = self._runs.get(run_id)
         return run.snapshot() if run else get_run(run_id)
 
-    async def create(self, requirement, max_dev_tasks):
+    def owner(self, run_id):
+        run = self._runs.get(run_id)
+        return run.session_id if run else run_owner(run_id)
+
+    async def create(self, requirement, max_dev_tasks, session_id=None):
         """Record a full run and start it in the background."""
         return await self._start(
-            Run(id=uuid.uuid4().hex, requirement=requirement),
+            Run(id=uuid.uuid4().hex, requirement=requirement, session_id=session_id),
             lambda on_event: run_crew(requirement, max_dev_tasks, on_event=on_event),
         )
 
-    async def refine(self, parent_id, instruction, target):
+    async def refine(self, parent_id, instruction, target, session_id=None):
         """Start a refinement of a finished run. Returns None if the parent is unknown."""
         parent = self.snapshot(parent_id)
         if not parent:
@@ -113,7 +118,7 @@ class RunStore:
         if parent["status"] != "done" or not parent.get("result"):
             raise ParentNotDone()
         run = Run(id=uuid.uuid4().hex, requirement=parent["requirement"],
-                  parent_id=parent_id, instruction=instruction)
+                  parent_id=parent_id, instruction=instruction, session_id=session_id)
         return await self._start(
             run, lambda on_event: refine_run(parent["result"], instruction, target, on_event=on_event)
         )
@@ -122,7 +127,7 @@ class RunStore:
         active = sum(1 for r in self._runs.values() if not r.finished)
         if active >= MAX_ACTIVE_RUNS:
             raise TooManyRuns()
-        await asyncio.to_thread(create_run, run.id, run.requirement, run.parent_id, run.instruction)
+        await asyncio.to_thread(create_run, run.id, run.requirement, run.parent_id, run.instruction, run.session_id)
         self._runs[run.id] = run
         self._evict()
         # Keep a reference to the task, otherwise it can be garbage-collected mid-run

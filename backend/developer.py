@@ -29,17 +29,27 @@ def _standards_block(standards, heading):
     return f"\n\n--- {heading} ---\n{rules}"
 
 
-async def write_code(task, language="JavaScript (Node.js + Express)", standards=None, design_context=None, on_text=None):
+async def write_code(task, language="JavaScript (Node.js + Express)", standards=None, design_context=None,
+                     other_tasks=None, on_text=None):
     """
     Ek task (text) le kar validated CodeOutput (language, filename, code, notes) return karta hai.
     design_context = (optional) Architect ka design (text) — code isse consistent rahe.
     standards = (optional) company coding rules ki list — RAG se aati hai.
                 Di gayi to code unhe FOLLOW karega.
+    other_tasks = (optional) titles of tasks written in parallel, so filenames don't collide
     on_text = (optional) streaming callback (raw JSON text so far)
     """
     prompt = f"Task: {task}\n\nIska code {language} mein likho."
     if design_context:
         prompt += f"\n\n--- PROJECT DESIGN (isse consistent raho) ---\n{design_context}"
+    if other_tasks:
+        listed = "\n".join(f"- {t}" for t in other_tasks)
+        prompt += (
+            "\n\n--- IS PROJECT KI BAAKI FILES (doosre developers parallel mein likh rahe hain) ---\n"
+            f"{listed}\nApni file ka path in sabse alag aur specific rakho "
+            "(jaise routes/auth.js, models/user.js — generic server.js/index.html nahi, "
+            "jab tak yeh task khud app ka entry point na ho)."
+        )
 
     # Agar company standards diye gaye hain to unhe prompt mein jod do (yahi RAG ka 'Augmented' hai)
     if standards:

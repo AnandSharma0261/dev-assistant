@@ -1,10 +1,9 @@
 // ============================================================
-//  Frontend — "Midnight IDE" theme
-//  Framer Motion (animations) + react-syntax-highlighter (code)
+//  dev.assistant — workspace layout
+//  Left: requirement + history. Right: live agent graph + tabbed results.
 // ============================================================
 
-import { useEffect, useRef, useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 // fonts (npm package se — internet par depend nahi)
 import '@fontsource/inter/400.css'
@@ -14,70 +13,113 @@ import '@fontsource/jetbrains-mono/400.css'
 import '@fontsource/jetbrains-mono/700.css'
 
 import './App.css'
-import { cancelRun, eventsUrl, getRun, refineRun, startRun } from './api'
+import { cancelRun, eventsUrl, getRun, listRuns, refineRun, startRun } from './api'
 import {
-  REFINE_STAGES, STAGES, STATUS_ICON, applyToResult, applyToStreams, emptyStreams, initialStages, stageStatus,
+  REFINE_STAGES, STAGES, applyToResult, applyToStreams, emptyStreams, initialStages, stageStatus, stagesFromResult,
 } from './runEvents'
-import Results from './components/Results'
+import HistoryPanel from './components/HistoryPanel'
+import Pipeline from './components/Pipeline'
+import ResultsTabs from './components/ResultsTabs'
 import StandardsPanel from './components/StandardsPanel'
 
-const EXAMPLE = "Ek To-Do list web app banao jisme user task add, delete, aur 'complete' mark kar sake. User login/signup bhi ho."
+const EXAMPLES = [
+  { label: 'Calculator', text: 'Ek simple calculator web app banao: + − × ÷, clear, backspace aur decimal support. Keyboard se bhi chale.' },
+  { label: 'To-do + login', text: "Ek To-Do list web app banao jisme user signup/login kare aur tasks add, delete aur 'complete' mark kar sake." },
+  { label: 'Blog', text: 'Ek blog platform banao jisme author posts likh, edit aur publish kar sake, aur readers comment kar sakein.' },
+  { label: 'Expense tracker', text: 'Ek expense tracker banao: expenses add karo category ke saath, monthly total aur category-wise breakdown dikhao.' },
+]
+const LABEL = Object.fromEntries(STAGES.map((s) => [s.key, s.label]))
+
+const setUrlRun = (runId) => {
+  const url = runId ? `?run=${runId}` : window.location.pathname
+  window.history.replaceState(null, '', url)
+}
+
+function useTheme() {
+  const [theme, setTheme] = useState(() => document.documentElement.dataset.theme || 'dark')
+  const toggle = () => {
+    const next = theme === 'dark' ? 'light' : 'dark'
+    document.documentElement.dataset.theme = next
+    try { localStorage.setItem('devassistant.theme', next) } catch { /* ignore */ }
+    setTheme(next)
+  }
+  return [theme, toggle]
+}
 
 function App() {
+  const [theme, toggleTheme] = useTheme()
   const [requirement, setRequirement] = useState('')
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState(null)
+  const [resultKey, setResultKey] = useState(0)          // new run => fresh tab state
   const [stages, setStages] = useState(initialStages)
+  const [times, setTimes] = useState({})                 // stage -> {start, end} for live timers
   const [streams, setStreams] = useState(emptyStreams)
   const [devTasks, setDevTasks] = useState([])
   const [devProgress, setDevProgress] = useState({ done: 0, total: 0 })
+  const [currentId, setCurrentId] = useState(null)       // run shown on screen
   const [doneRunId, setDoneRunId] = useState(null)       // latest successful run (download / refine)
   const [refineHistory, setRefineHistory] = useState([])
+  const [history, setHistory] = useState([])
+  const [historyError, setHistoryError] = useState('')
+  const [announcement, setAnnouncement] = useState('')   // for screen readers
   const [error, setError] = useState('')
   const sourceRef = useRef(null)
   const runIdRef = useRef(null)   // the run in progress, if any
+
+  const refreshHistory = useCallback(async () => {
+    try {
+      setHistory((await listRuns()).items)
+      setHistoryError('')
+    } catch (e) {
+      setHistoryError(e.message)
+    }
+  }, [])
 
   const closeStream = () => {
     sourceRef.current?.close()
     sourceRef.current = null
   }
 
-  // Close the SSE connection if the component unmounts mid-run
-  useEffect(() => closeStream, [])
-
-  // Leaving the page cancels the run in progress, so it stops using LLM quota.
-  // keepalive lets the request finish even while the page is unloading.
-  useEffect(() => {
-    const onPageHide = () => {
-      if (runIdRef.current) cancelRun(runIdRef.current, { keepalive: true }).catch(() => {})
-    }
-    window.addEventListener('pagehide', onPageHide)
-    return () => window.removeEventListener('pagehide', onPageHide)
-  }, [])
+  const resetView = () => {
+    closeStream()
+    setError(''); setResult(null); setDoneRunId(null); setRefineHistory([]); setTimes({})
+    setStages(initialStages()); setStreams(emptyStreams()); setDevTasks([]); setDevProgress({ done: 0, total: 0 })
+    setResultKey((k) => k + 1)
+  }
 
   const finish = (errorMessage) => {
     runIdRef.current = null
     closeStream()
     setLoading(false)
     setStreams(emptyStreams())
+    refreshHistory()
     if (errorMessage) {
       setError(errorMessage)
-      setStages((s) => Object.fromEntries(
-        Object.entries(s).map(([k, v]) => [k, v === 'running' ? 'failed' : v]),
-      ))
+      setStages((s) => Object.fromEntries(Object.entries(s).map(([k, v]) => [k, v === 'running' ? 'failed' : v])))
     }
   }
 
   // Subscribe to a run's live progress (Server-Sent Events)
   const listen = (runId) => {
     runIdRef.current = runId
+    setLoading(true)
     const es = new EventSource(eventsUrl(runId))
     sourceRef.current = es
 
     es.addEventListener('stage', (e) => {
       const event = JSON.parse(e.data)
       const { stage, status, data } = event
-      setStages((s) => ({ ...s, [stage]: stageStatus(event) }))
+      const shown = stageStatus(event)
+      setStages((s) => ({ ...s, [stage]: shown }))
+      if (status === 'started') {
+        setTimes((t) => ({ ...t, [stage]: { start: Date.now() } }))
+        setAnnouncement(`${LABEL[stage]} started`)
+      }
+      if (status === 'done' || status === 'failed') {
+        setTimes((t) => ({ ...t, [stage]: { start: t[stage]?.start ?? Date.now(), end: Date.now() } }))
+        setAnnouncement(`${LABEL[stage]} ${shown}`)
+      }
       if (stage === 'developer') {
         if (status === 'started') {
           setDevTasks(data?.tasks || [])
@@ -96,6 +138,7 @@ function App() {
         const run = await getRun(runId)
         setResult(run.result)
         setDoneRunId(runId)
+        setAnnouncement('Run finished')
         finish()
       } catch (e) {
         finish(e.message)
@@ -104,35 +147,88 @@ function App() {
     es.addEventListener('failed', (e) => finish(JSON.parse(e.data).message))
     es.addEventListener('cancelled', () => finish('Run cancelled.'))
     // Network blips: EventSource reconnects by itself (resuming via Last-Event-ID).
-    // It only gives up (CLOSED) on a hard failure such as a 404.
+    // It only gives up (CLOSED) on a hard failure such as a 404/410.
     es.onerror = () => {
       if (es.readyState === EventSource.CLOSED) finish('Lost connection to the server.')
     }
   }
 
+  // Open a run from history or from a ?run= link
+  const openRun = useCallback(async (runId) => {
+    if (runIdRef.current) return   // don't abandon a run in progress
+    resetView()
+    setCurrentId(runId)
+    setUrlRun(runId)
+    try {
+      const run = await getRun(runId)
+      setRequirement(run.requirement)
+      if (run.instruction) setRefineHistory([{ instruction: run.instruction, target: run.result?.refinement?.target || '' }])
+      if (run.status === 'queued' || run.status === 'running') {
+        setResult({})
+        listen(runId)   // events replay from the start, then continue live
+      } else if (run.status === 'done' && run.result) {
+        setResult(run.result)
+        setStages(stagesFromResult(run.result))
+        setDoneRunId(runId)
+      } else {
+        setError(run.error || `This run ${run.status}.`)
+      }
+    } catch (e) {
+      setError(e.status === 404 ? 'Run not found.' : e.message)
+      setUrlRun(null)
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Close the SSE connection if the component unmounts mid-run
+  useEffect(() => closeStream, [])
+
+  // First load: history, plus the run in the URL if there is one
+  useEffect(() => {
+    refreshHistory()
+    const runId = new URLSearchParams(window.location.search).get('run')
+    if (runId) openRun(runId)
+  }, [refreshHistory, openRun])
+
+  // Leaving the page cancels the run in progress, so it stops using LLM quota.
+  // keepalive lets the request finish even while the page is unloading.
+  useEffect(() => {
+    const onPageHide = () => {
+      if (runIdRef.current) cancelRun(runIdRef.current, { keepalive: true }).catch(() => {})
+    }
+    window.addEventListener('pagehide', onPageHide)
+    return () => window.removeEventListener('pagehide', onPageHide)
+  }, [])
+
   const handleGenerate = async () => {
-    if (!requirement.trim()) { setError('Pehle requirement likho.'); return }
-    closeStream()
-    setError(''); setLoading(true); setResult(null); setDoneRunId(null); setRefineHistory([])
-    setStages(initialStages()); setStreams(emptyStreams()); setDevTasks([]); setDevProgress({ done: 0, total: 0 })
+    if (loading) return
+    if (requirement.trim().length < 10) { setError('Requirement thoda detail mein likho (kam se kam 10 characters).'); return }
+    resetView()
+    setLoading(true)
     try {
       const { run_id: runId } = await startRun(requirement)
+      setCurrentId(runId)
+      setUrlRun(runId)
       listen(runId)
+      refreshHistory()
     } catch (e) {
       finish(e.message)
     }
   }
 
   const handleRefine = async (instruction, target) => {
-    if (!doneRunId) return
-    setError(''); setLoading(true)
+    if (!doneRunId || loading) return
+    setError('')
     // Only the refined part re-runs; every other stage keeps the parent's result
     const rerun = REFINE_STAGES[target]
     setStages((s) => Object.fromEntries(Object.keys(s).map((k) => [k, rerun.includes(k) ? 'pending' : s[k]])))
+    setTimes((t) => Object.fromEntries(Object.entries(t).filter(([k]) => !rerun.includes(k))))
     try {
       const { run_id: runId } = await refineRun(doneRunId, instruction, target)
       setRefineHistory((h) => [...h, { instruction, target }])
+      setCurrentId(runId)
+      setUrlRun(runId)
       listen(runId)
+      refreshHistory()
     } catch (e) {
       finish(e.message)
     }
@@ -149,113 +245,101 @@ function App() {
     }
   }
 
-  const showPipeline = loading || Object.values(stages).some((s) => s !== 'pending')
+  const handleNew = () => {
+    if (runIdRef.current) return
+    resetView()
+    setCurrentId(null)
+    setRequirement('')
+    setUrlRun(null)
+  }
+
+  const running = STAGES.filter(({ key }) => stages[key] === 'running').map((s) => s.label)
+  const statusText = loading
+    ? running.length ? `${running.join(' + ')} working${running.length > 1 ? ' in parallel' : ''}…` : 'Starting…'
+    : doneRunId ? 'Finished' : error ? 'Stopped' : 'Idle'
 
   return (
-    <div className="app">
-      {/* ---- Header ---- */}
-      <motion.header
-        className="header"
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.6 }}
-      >
+    <div className="shell">
+      <header className="topbar">
         <div className="brand">
-          <span className="brand-mark">◆</span>
-          <h1>dev<span className="accent">.assistant</span></h1>
+          <span className="brand-mark" aria-hidden="true">◆</span>
+          <span className="brand-name">dev<span className="accent">.assistant</span></span>
+          <span className="tagline">a team of AI agents: plan · design · code · preview · review · fix · test</span>
         </div>
-        <p className="tagline">// requirement → plan · design · code · preview · review · fix · tests</p>
-      </motion.header>
+        <button className="icon-btn" onClick={toggleTheme} aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
+          {theme === 'dark' ? '☀︎' : '☾'}
+        </button>
+      </header>
 
-      {/* ---- Input panel ---- */}
-      <motion.section
-        className="card input-card"
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5, delay: 0.15 }}
-      >
-        <div className="label">$ requirement</div>
-        <textarea
-          className="textarea"
-          rows={5}
-          placeholder="e.g. Ek blog website banao jisme user post likh sake..."
-          value={requirement}
-          onChange={(e) => setRequirement(e.target.value)}
-        />
-        <div className="btn-row">
-          {loading ? (
-            <button className="btn-ghost" onClick={handleCancel}>Cancel</button>
-          ) : (
-            <button className="btn-ghost" onClick={() => setRequirement(EXAMPLE)}>Try Example</button>
-          )}
-          <motion.button
-            className="btn-primary"
-            onClick={handleGenerate}
-            disabled={loading}
-            whileHover={{ scale: loading ? 1 : 1.04 }}
-            whileTap={{ scale: loading ? 1 : 0.96 }}
-          >
-            {loading ? 'Running…' : '⚡ Generate'}
-          </motion.button>
-        </div>
-        {error && <p className="error">{error}</p>}
-        <StandardsPanel disabled={loading} />
-      </motion.section>
-
-      {/* ---- Live agent pipeline (driven by SSE stage events) ---- */}
-      <AnimatePresence>
-        {showPipeline && (
-          <motion.div
-            className="loader"
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-          >
-            <div className="pipeline">
-              {STAGES.map(({ key, label }) => {
-                const status = stages[key]
-                return (
-                  <motion.div
-                    key={key}
-                    className={`stage stage-${status}`}
-                    animate={status === 'running' ? { opacity: [0.5, 1, 0.5] } : { opacity: 1 }}
-                    transition={status === 'running' ? { duration: 1.2, repeat: Infinity } : { duration: 0.2 }}
-                    title={status === 'skipped' ? 'No high-severity findings, so nothing to fix' : undefined}
-                  >
-                    <span className="stage-icon">{STATUS_ICON[status]}</span> {label}
-                    {key === 'developer' && devProgress.total > 0 && status !== 'pending' && (
-                      <span className="stage-count"> {devProgress.done}/{devProgress.total}</span>
-                    )}
-                  </motion.div>
-                )
-              })}
+      <div className="workspace">
+        <aside className="sidebar">
+          <section className="panel composer" aria-label="Requirement">
+            <label className="label" htmlFor="requirement">What should the team build?</label>
+            <textarea
+              id="requirement"
+              className="textarea"
+              rows={6}
+              placeholder="e.g. Ek blog website banao jisme user post likh sake…"
+              value={requirement}
+              maxLength={4000}
+              onChange={(e) => setRequirement(e.target.value)}
+              onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') handleGenerate() }}
+            />
+            <div className="chips" aria-label="Examples">
+              {EXAMPLES.map((ex) => (
+                <button key={ex.label} className="chip" disabled={loading} onClick={() => setRequirement(ex.text)}>{ex.label}</button>
+              ))}
             </div>
-            {loading && (
-              <p className="loader-text">
-                {(() => {
-                  // Several agents can run at once (parallel Developer tasks, Preview, Reviewer + QA)
-                  const running = STAGES.filter(({ key }) => stages[key] === 'running').map((s) => s.label)
-                  if (running.length === 0) return 'Run shuru ho raha hai…'
-                  return running.length === 1
-                    ? `${running[0]} kaam kar raha hai…`
-                    : `${running.join(' + ')} parallel mein kaam kar rahe hain…`
-                })()}
-              </p>
-            )}
-          </motion.div>
-        )}
-      </AnimatePresence>
+            <div className="btn-row">
+              <span className="dim small hint">⌘/Ctrl + Enter</span>
+              {loading && <button className="btn-ghost" onClick={handleCancel}>Cancel</button>}
+              <button className="btn-primary" onClick={handleGenerate} disabled={loading}>
+                {loading ? 'Running…' : 'Generate'}
+              </button>
+            </div>
+            {error && <p className="error" role="alert">{error}</p>}
+            <StandardsPanel disabled={loading} />
+          </section>
 
-      {/* ---- Results (each section appears as soon as its agent has output) ---- */}
-      {result && (
-        <Results
-          data={result}
-          streams={streams}
-          devTasks={devTasks}
-          runId={doneRunId}
-          busy={loading}
-          onRefine={handleRefine}
-          refineHistory={refineHistory}
-        />
-      )}
+          <HistoryPanel items={history} activeId={currentId} onOpen={openRun} onNew={handleNew} error={historyError} />
+        </aside>
+
+        <main className="main">
+          <section className="panel pipeline-panel" aria-label="Agent pipeline">
+            <div className="panel-head">
+              <h2>Agent pipeline</h2>
+              <span className={`run-status ${loading ? 'is-live' : ''}`}>{statusText}</span>
+            </div>
+            <Pipeline stages={stages} times={times} devProgress={devProgress} />
+            <p className="sr-only" aria-live="polite">{announcement}</p>
+          </section>
+
+          {result ? (
+            <ResultsTabs
+              key={resultKey}
+              data={result}
+              streams={streams}
+              devTasks={devTasks}
+              stages={stages}
+              runId={doneRunId}
+              busy={loading}
+              onRefine={handleRefine}
+              refineHistory={refineHistory}
+            />
+          ) : (
+            <section className="panel empty">
+              <h2>Describe an app, watch the team build it</h2>
+              <ul className="feature-list">
+                <li><strong>Live</strong> — every agent streams its work; code appears as it is typed.</li>
+                <li><strong>Parallel</strong> — independent agents run side by side, as the graph shows.</li>
+                <li><strong>Self-correcting</strong> — review findings go back to the developer, then get re-checked.</li>
+                <li><strong>Clickable prototype</strong> — runs in a locked-down sandbox; refine it in plain words.</li>
+                <li><strong>Your rules</strong> — company coding standards are retrieved per task (RAG).</li>
+              </ul>
+            </section>
+          )}
+        </main>
+      </div>
     </div>
   )
 }

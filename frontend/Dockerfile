@@ -10,6 +10,9 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
+# The app calls the API through nginx's /api proxy (same origin, no CORS)
+ARG VITE_API_URL=/api
+ENV VITE_API_URL=$VITE_API_URL
 RUN npm run build          # 'dist/' folder mein static HTML/JS/CSS banta hai
 
 # ---- Stage 2: Serve (nginx se wo static files dikhao) ----

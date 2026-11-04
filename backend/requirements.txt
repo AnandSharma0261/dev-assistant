@@ -18,3 +18,4 @@ pydantic==2.12.5          # request validation + agent output schemas
 
 # --- Database ---
 sqlalchemy==2.1.8         # ORM — Python class <-> database table
+psycopg[binary]==3.2.13   # Postgres driver (only used when DATABASE_URL is Postgres)

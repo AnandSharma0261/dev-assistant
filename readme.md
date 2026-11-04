@@ -56,7 +56,13 @@ passed to Gemini as `response_schema`, then validated again on the server.
   de-duplicated.
 - **Your own standards.** Upload a Markdown document (`PUT /standards`). It is
   validated, stored and re-indexed for RAG; `DELETE /standards` restores the
-  built-in one.
+  built-in one. Standards apply to everyone on the server, so both calls need
+  the server's `ADMIN_TOKEN`. Without one, uploads are turned off.
+- **Workspace UI.** The agents are drawn as their real dependency graph, with
+  live timers and parallel branches side by side. Results sit in tabs. History
+  is a sidebar, with refinements nested under their run. The run id goes into
+  the URL, so a refresh keeps the run and the link can be shared. There are
+  light and dark themes, built from tokens checked for WCAG AA contrast.
 
 ## Design decisions
 
@@ -83,28 +89,40 @@ passed to Gemini as `response_schema`, then validated again on the server.
   opaque origin, plus a CSP that blocks all network access.
 - **Runs are persisted.** Status, error and report are stored in the database,
   so history survives restarts. Runs interrupted by a restart are marked failed.
+- **Anonymous sessions instead of accounts.** Each browser sends a random
+  `X-Session-Id`. History, cancel and refine only work on that session's own
+  runs; another session's run returns 404, the same as one that doesn't
+  exist. Reading a run by its id (report, events, ZIP) works without a session,
+  because ids are random UUIDs, so a run link acts as an unlisted share link.
+- **One origin in Docker.** nginx serves the app and proxies `/api` to the
+  backend, with buffering off so SSE flows, so the browser needs no CORS. For
+  local development any `localhost` port is allowed; other origins have to be
+  listed in `CORS_ORIGINS`.
 
-**Known limit:** runs execute inside the API process, which fits a single
-instance. Scaling out needs a shared queue and worker (for example Redis with
+**Known limit:** runs execute inside the API process, so run **one** uvicorn
+worker per instance; a second worker couldn't stream a run the first one
+started. Scaling out needs a shared queue and worker (for example Redis with
 ARQ or Celery), with events sent over Redis pub/sub.
 
 ## API
 
 All responses use one envelope: `{"success": true, "data": ...}` or
 `{"success": false, "message": "...", "errors"?: [...]}`, with matching status codes.
+Starting runs, listing history, cancelling and refining need an `X-Session-Id`
+header (16–64 characters, `[A-Za-z0-9-]`). Changing standards needs `X-Admin-Token`.
 
 | Method | Path | |
 |---|---|---|
 | GET | `/health` | liveness and RAG index status |
 | POST | `/plan` | Planner only (quick) |
 | POST | `/runs` | start a full run; returns `202 {run_id}`. Body: `requirement` (10–4000 chars), `max_dev_tasks` (1–5) |
-| GET | `/runs` | history, newest first (`limit`, `offset`) |
+| GET | `/runs` | this session's history, newest first (`limit`, `offset`) |
 | GET | `/runs/{id}` | status and full report |
 | GET | `/runs/{id}/events` | SSE: `status`, `stage` (`started` / `delta` / `progress` / `done` / `failed`), then `done`, `failed` or `cancelled` |
 | DELETE | `/runs/{id}` | cancel a run in progress, including its in-flight LLM calls |
 | POST | `/runs/{id}/refine` | follow-up on a finished run: `{instruction, target: "preview" \| "code"}` |
 | GET | `/runs/{id}/download` | ZIP of everything the run produced |
-| GET / PUT / DELETE | `/standards` | view, upload (`{content}`) or reset the coding standards |
+| GET / PUT / DELETE | `/standards` | view, upload (`{content}`) or reset the coding standards (PUT/DELETE: admin token) |
 
 Interactive docs: http://localhost:8000/docs
 
@@ -116,7 +134,7 @@ You need Python 3.11+, Node 20+ and a Gemini API key from https://aistudio.googl
 
 ```bash
 cp backend/.env.example backend/.env   # then put your GEMINI_API_KEY in it
-docker compose up --build              # app: http://localhost:3000
+docker compose up --build              # app: http://localhost:3000 (API proxied at /api)
 ```
 
 **Local development**
@@ -135,7 +153,8 @@ npm ci
 npm run dev                            # URL is printed (VITE_API_URL defaults to localhost:8000)
 ```
 
-**Configuration** (`backend/.env`): `GEMINI_API_KEY` (required). Optional:
+**Configuration** (`backend/.env`): `GEMINI_API_KEY` (required). `ADMIN_TOKEN` enables
+standards uploads. `CORS_ORIGINS` lists extra allowed frontend origins. Optional:
 `GEMINI_MODELS` (fallback order), `GEMINI_MAX_CONCURRENCY`,
 `GEMINI_TIMEOUT_SECONDS`, `GEMINI_PRICING` (JSON, USD per 1M tokens), `FIX_SEVERITIES`
 (default `High,Medium`), `DATABASE_URL`, `CHROMA_PATH`, `DATA_DIR` (uploaded standards).
@@ -144,10 +163,22 @@ The cost estimate uses public price-tracker figures for Gemini 3.5 Flash and Fla
 (Nov 2026), not Google's official price list, so check
 https://ai.google.dev/gemini-api/docs/pricing. Free-tier usage isn't billed.
 
+## Deploying (e.g. Render + Vercel)
+
+- **Backend:** deploy the `backend/` Dockerfile and set `GEMINI_API_KEY`. Use a
+  Postgres database for `DATABASE_URL`, since hosts like Render have no
+  persistent disk and a SQLite file would be wiped on every deploy;
+  `postgres://` URLs work as-is. Keep a single instance with one worker.
+- **Frontend:** build with `VITE_API_URL=https://<your-backend>`, and add the
+  frontend's URL to the backend's `CORS_ORIGINS`. Or serve both through the
+  bundled nginx, which proxies `/api`.
+
 ## Tests
 
 ```bash
 cd backend && venv/bin/python -m pytest
+# against Postgres instead of SQLite:
+TEST_DATABASE_URL=postgres://user:pass@localhost:5432/db venv/bin/python -m pytest
 ```
 
 The tests swap Gemini for a fake model, so they need no key and make no API
@@ -179,5 +210,7 @@ backend/
 frontend/src/
   App.jsx           run lifecycle (start, SSE, cancel, refine)
   runEvents.js      how stage events update the report and live streams
-  components/       Results, CodeBlock, LivePreview, RefinePanel, Timeline, StandardsPanel
+  components/       Pipeline (agent graph), ResultsTabs, CodeBlock, LivePreview, RefinePanel,
+                    Timeline, HistoryPanel, StandardsPanel
+  index.css         design tokens: light/dark themes, agent colors
 ```

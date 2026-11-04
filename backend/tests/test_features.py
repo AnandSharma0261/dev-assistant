@@ -13,7 +13,7 @@ import app as app_module
 import crew
 import rag
 import schemas as s
-from conftest import RAW_PREVIEW
+from conftest import RAW_PREVIEW, SESSION
 from export import _safe_path, build_zip
 from runs import runs
 from streaming import DeltaEmitter, partial_json_string
@@ -165,7 +165,7 @@ def test_metrics_count_retries(fake_llm):
 @pytest.fixture
 def client(fake_llm):
     runs._runs.clear()
-    with TestClient(app_module.app) as c:
+    with TestClient(app_module.app, headers={"X-Session-Id": SESSION}) as c:
         yield c
 
 
@@ -269,9 +269,17 @@ Use the repository layer for every database query; never call the driver directl
 """
 
 
-def test_custom_standards_replace_the_builtin_ones(client):
+ADMIN = {"X-Admin-Token": "s3cret-admin"}
+
+
+@pytest.fixture
+def admin(monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", ADMIN["X-Admin-Token"])
+
+
+def test_custom_standards_replace_the_builtin_ones(client, admin):
     try:
-        r = client.put("/standards", json={"content": CUSTOM})
+        r = client.put("/standards", json={"content": CUSTOM}, headers=ADMIN)
         assert r.status_code == 200
         data = r.json()["data"]
         assert data["source"] == "custom"
@@ -282,7 +290,7 @@ def test_custom_standards_replace_the_builtin_ones(client):
         found = rag.search_standards("Fetch the user record from the database by id")
         assert [r.splitlines()[0] for r in found] == ["## Tabs not spaces [always]", "## Database access"]
     finally:
-        r = client.delete("/standards")
+        r = client.delete("/standards", headers=ADMIN)
     assert r.json()["data"]["source"] == "default"
     assert rag.status()["rules"] == 7
 
@@ -293,7 +301,21 @@ def test_custom_standards_without_headings_split_into_paragraphs():
 
 
 @pytest.mark.parametrize("content", ["", "   ", "x" * (rag.MAX_DOC_CHARS + 1), "bad\x00binary"])
-def test_invalid_standards_are_rejected(client, content):
-    r = client.put("/standards", json={"content": content})
+def test_invalid_standards_are_rejected(client, admin, content):
+    r = client.put("/standards", json={"content": content}, headers=ADMIN)
     assert r.status_code == 422 and r.json()["success"] is False
     assert client.get("/standards").json()["data"]["source"] == "default"
+
+
+def test_standards_upload_needs_the_admin_token(client, monkeypatch):
+    monkeypatch.delenv("ADMIN_TOKEN", raising=False)
+    assert client.get("/standards").json()["data"]["editable"] is False
+    r = client.put("/standards", json={"content": CUSTOM})
+    assert r.status_code == 403 and "disabled" in r.json()["message"]
+
+    monkeypatch.setenv("ADMIN_TOKEN", ADMIN["X-Admin-Token"])
+    assert client.get("/standards").json()["data"]["editable"] is True
+    assert client.put("/standards", json={"content": CUSTOM}).status_code == 401
+    assert client.put("/standards", json={"content": CUSTOM}, headers={"X-Admin-Token": "wrong"}).status_code == 401
+    assert client.delete("/standards").status_code == 401
+    assert rag.status()["source"] == "default"

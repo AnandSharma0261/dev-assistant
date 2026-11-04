@@ -1,6 +1,4 @@
-import { motion } from 'framer-motion'
 import { STAGES } from '../runEvents'
-import { item } from '../motion'
 
 const LABEL = Object.fromEntries(STAGES.map((s) => [s.key, s.label]))
 const secs = (ms) => `${(ms / 1000).toFixed(1)}s`
@@ -23,8 +21,7 @@ export default function Timeline({ metrics }) {
   }
 
   return (
-    <motion.section className="card" variants={item}>
-      <h2><span className="h-mark">▸</span> Run Timeline</h2>
+    <div className="timeline">
       <div className="stat-row">
         <div className="stat"><span className="stat-value">{secs(total)}</span><span className="dim">total</span></div>
         {speedup > 1 && (
@@ -46,8 +43,8 @@ export default function Timeline({ metrics }) {
               <span className="gantt-label">{LABEL[s.stage] || s.stage}</span>
               <div className="gantt-track">
                 <div
-                  className={`gantt-bar bar-${s.stage}`}
-                  style={{ left: `${(s.start_ms / total) * 100}%`, width: `${Math.max(((end - s.start_ms) / total) * 100, 0.8)}%` }}
+                  className="gantt-bar"
+                  style={{ background: `var(--agent-${s.stage})`, left: `${(s.start_ms / total) * 100}%`, width: `${Math.max(((end - s.start_ms) / total) * 100, 0.8)}%` }}
                   title={`${secs(s.start_ms)} → ${secs(end)}`}
                 />
               </div>
@@ -73,6 +70,6 @@ export default function Timeline({ metrics }) {
           ))}
         </tbody>
       </table>
-    </motion.section>
+    </div>
   )
 }

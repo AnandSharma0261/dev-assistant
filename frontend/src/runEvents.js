@@ -1,13 +1,19 @@
 // How SSE "stage" events from the backend update the UI state.
 
+// x/y: the node's position (%) in the pipeline graph; edges follow the
+// backend's dependency graph (crew.py), so parallel branches are visible.
 export const STAGES = [
-  { key: 'planner', label: 'Planner' },
-  { key: 'architect', label: 'Architect' },
-  { key: 'developer', label: 'Developer' },
-  { key: 'preview', label: 'Preview' },
-  { key: 'reviewer', label: 'Reviewer' },
-  { key: 'fix', label: 'Fix' },
-  { key: 'qa', label: 'QA' },
+  { key: 'planner', label: 'Planner', desc: 'Splits into tasks', x: 8, y: 50 },
+  { key: 'architect', label: 'Architect', desc: 'Stack, models, API', x: 26, y: 50 },
+  { key: 'developer', label: 'Developer', desc: 'Code + RAG rules', x: 46, y: 18 },
+  { key: 'preview', label: 'Preview', desc: 'Clickable prototype', x: 46, y: 82 },
+  { key: 'reviewer', label: 'Reviewer', desc: 'Bugs + standards', x: 67, y: 18 },
+  { key: 'fix', label: 'Fix', desc: 'Fix, then re-check', x: 88, y: 18 },
+  { key: 'qa', label: 'QA', desc: 'Test cases', x: 67, y: 82 },
+]
+export const EDGES = [
+  ['planner', 'architect'], ['architect', 'developer'], ['architect', 'preview'],
+  ['developer', 'reviewer'], ['developer', 'qa'], ['reviewer', 'fix'],
 ]
 
 export const STATUS_ICON = { pending: '○', running: '◌', done: '✓', failed: '✕', skipped: '–' }
@@ -65,4 +71,15 @@ export function applyToStreams(streams, { stage, status, data }) {
     }
   }
   return streams
+}
+
+// Stage states for a finished report (e.g. opened from history or a link)
+export function stagesFromResult(result) {
+  const has = {
+    planner: result.plan, architect: result.design, developer: result.dev_outputs?.length,
+    preview: result.preview, reviewer: result.review, qa: result.tests,
+  }
+  const s = Object.fromEntries(Object.entries(has).map(([k, v]) => [k, v ? 'done' : 'failed']))
+  s.fix = result.self_correction ? 'done' : 'skipped'
+  return s
 }
