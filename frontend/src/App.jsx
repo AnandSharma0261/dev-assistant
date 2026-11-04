@@ -24,11 +24,27 @@ const STAGES = [
   { key: 'planner', label: 'Planner' },
   { key: 'architect', label: 'Architect' },
   { key: 'developer', label: 'Developer' },
+  { key: 'preview', label: 'Preview' },
   { key: 'reviewer', label: 'Reviewer' },
   { key: 'qa', label: 'QA' },
 ]
 // Which part of the report each stage's "done" event fills in
-const RESULT_KEY = { planner: 'plan', architect: 'design', reviewer: 'review', qa: 'tests' }
+const RESULT_KEY = { planner: 'plan', architect: 'design', preview: 'preview', reviewer: 'review', qa: 'tests' }
+
+// Generated prototypes are untrusted code. On top of the iframe sandbox
+// (no allow-same-origin => opaque origin: no access to our cookies, storage
+// or DOM), this CSP blocks every network request, so the code can't load
+// or send anything. Inline styles/scripts and data: images still work.
+const PREVIEW_CSP =
+  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; form-action 'none'"
+
+function withCsp(html) {
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`
+  // The CSP meta must come before any script, so put it at the start of <head>
+  return /<head[^>]*>/i.test(html)
+    ? html.replace(/<head[^>]*>/i, (m) => `${m}${meta}`)
+    : `${meta}${html}`
+}
 const STATUS_ICON = { pending: '○', running: '◌', done: '✓', failed: '✕' }
 
 const initialStages = () => Object.fromEntries(STAGES.map((s) => [s.key, 'pending']))
@@ -93,7 +109,8 @@ function App() {
     es.addEventListener('stage', (e) => {
       const event = JSON.parse(e.data)
       const { stage, status, data } = event
-      setStages((s) => ({ ...s, [stage]: status === 'done' ? 'done' : 'running' }))
+      const shown = status === 'done' || status === 'failed' ? status : 'running'
+      setStages((s) => ({ ...s, [stage]: shown }))
       if (stage === 'developer') {
         if (status === 'started') setDevProgress({ done: 0, total: data?.total || 0 })
         if (status === 'progress') setDevProgress((p) => ({ ...p, done: p.done + 1 }))
@@ -229,11 +246,59 @@ function App() {
 }
 
 // ============================================================
+//  LivePreview — runs the Preview agent's HTML in a locked-down iframe
+// ============================================================
+function LivePreview({ html }) {
+  const [showCode, setShowCode] = useState(false)
+  const frameRef = useRef(null)
+  const srcDoc = withCsp(html)
+
+  return (
+    <motion.section className="card" variants={item}>
+      <div className="preview-head">
+        <h2><span className="h-mark">▸</span> Live Preview</h2>
+        <div className="preview-actions">
+          <button className="btn-ghost" onClick={() => setShowCode((v) => !v)}>
+            {showCode ? 'Preview' : 'Code'}
+          </button>
+          <button className="btn-ghost" onClick={() => frameRef.current?.requestFullscreen?.()}>
+            Full screen
+          </button>
+        </div>
+      </div>
+      {showCode ? (
+        <SyntaxHighlighter
+          language="markup"
+          style={oneDark}
+          customStyle={{ borderRadius: 12, fontSize: 13, margin: 0, background: '#0d1117', maxHeight: 520 }}
+        >
+          {html}
+        </SyntaxHighlighter>
+      ) : (
+        <iframe
+          ref={frameRef}
+          className="preview-frame"
+          title="Generated app preview"
+          sandbox="allow-scripts allow-modals"
+          srcDoc={srcDoc}
+        />
+      )}
+      <p className="dim preview-note">
+        Prototype runs in a sandbox: no network, no backend, data lives in memory.
+      </p>
+    </motion.section>
+  )
+}
+
+// ============================================================
 //  Results — saari report sections, stagger animation ke saath
 // ============================================================
 function Results({ data }) {
   return (
     <motion.div className="results" variants={container} initial="hidden" animate="show">
+      {/* Live preview of the generated prototype */}
+      {data.preview?.html && <LivePreview html={data.preview.html} />}
+
       {/* Plan */}
       {data.plan && <motion.section className="card" variants={item}>
         <h2><span className="h-mark">▸</span> Plan</h2>
