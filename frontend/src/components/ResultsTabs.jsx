@@ -136,7 +136,24 @@ function TestsTab({ tests }) {
   )
 }
 
-/** The report as tabs; a tab is enabled as soon as its agent has started producing it. */
+const PENDING_TEXT = {
+  preview: 'Preview agent is building the prototype…',
+  code: 'Developer is writing the code…',
+  plan: 'Planner and Architect are working…',
+  review: 'Reviewer is checking the code…',
+  tests: 'QA is writing test cases…',
+}
+
+function Skeleton({ text }) {
+  return (
+    <div className="skeleton" aria-busy="true">
+      <p className="dim">{text}</p>
+      {[92, 78, 85, 60].map((w) => <div key={w} className="skeleton-line" style={{ width: `${w}%` }} />)}
+    </div>
+  )
+}
+
+/** The report as tabs; a tab can be opened as soon as its agent starts (showing a placeholder until output arrives). */
 export default function ResultsTabs({ data, streams, devTasks, stages, runId, busy, onRefine, refineHistory }) {
   const [userTab, setUserTab] = useState(null)
   const dev = data.dev_outputs || []
@@ -153,9 +170,11 @@ export default function ResultsTabs({ data, streams, devTasks, stages, runId, bu
     { key: 'tests', label: 'Tests', agent: 'qa', ready: Boolean(data.tests), running: stages.qa === 'running', count: data.tests?.test_cases.length },
     { key: 'timeline', label: 'Timeline', agent: 'fix', ready: Boolean(data.metrics), running: false },
   ]
-  const available = tabs.filter((t) => t.ready)
+  const openable = tabs.filter((t) => t.ready || t.running)
   // Follow the most interesting output until the user picks a tab themselves
-  const active = available.find((t) => t.key === userTab)?.key || available[0]?.key
+  const active = openable.find((t) => t.key === userTab)?.key
+    || tabs.find((t) => t.ready)?.key || openable[0]?.key
+  const activeTab = tabs.find((t) => t.key === active)
 
   return (
     <section className="results panel" aria-label="Results">
@@ -166,7 +185,7 @@ export default function ResultsTabs({ data, streams, devTasks, stages, runId, bu
               key={t.key}
               role="tab"
               aria-selected={active === t.key}
-              disabled={!t.ready}
+              disabled={!t.ready && !t.running}
               className={`tab ${active === t.key ? 'active' : ''}`}
               style={{ '--agent': `var(--agent-${t.agent})` }}
               onClick={() => setUserTab(t.key)}
@@ -181,9 +200,10 @@ export default function ResultsTabs({ data, streams, devTasks, stages, runId, bu
       </div>
 
       <div className="tab-panel" role="tabpanel">
-        {!active && <p className="dim waiting">Agents are starting… results appear here as each one finishes.</p>}
+        {!active && <Skeleton text="Agents are starting… results appear here as each one works." />}
+        {activeTab && !activeTab.ready && <Skeleton text={PENDING_TEXT[active]} />}
 
-        {active === 'preview' && (
+        {active === 'preview' && activeTab.ready && (
           <>
             <LivePreview html={data.preview?.html} streaming={streams.preview} />
             {(canRefine || refineHistory.length > 0) && (
@@ -192,7 +212,7 @@ export default function ResultsTabs({ data, streams, devTasks, stages, runId, bu
           </>
         )}
 
-        {active === 'code' && (
+        {active === 'code' && activeTab.ready && (
           <Section title={`Generated code · ${fileCount} file${fileCount === 1 ? '' : 's'}`} agent="developer">
             {Array.from({ length: fileCount }, (_, i) => {
               const fixing = streams.fix[i]
@@ -214,10 +234,10 @@ export default function ResultsTabs({ data, streams, devTasks, stages, runId, bu
           </Section>
         )}
 
-        {active === 'plan' && <PlanTab data={data} />}
-        {active === 'review' && <ReviewTab review={data.review} sc={data.self_correction} files={dev} />}
-        {active === 'tests' && <TestsTab tests={data.tests} />}
-        {active === 'timeline' && (
+        {active === 'plan' && activeTab.ready && <PlanTab data={data} />}
+        {active === 'review' && activeTab.ready && <ReviewTab review={data.review} sc={data.self_correction} files={dev} />}
+        {active === 'tests' && activeTab.ready && <TestsTab tests={data.tests} />}
+        {active === 'timeline' && activeTab.ready && (
           <Section title="Run timeline" agent="fix"><Timeline metrics={data.metrics} /></Section>
         )}
       </div>

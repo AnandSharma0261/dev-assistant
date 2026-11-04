@@ -23,10 +23,10 @@ import ResultsTabs from './components/ResultsTabs'
 import StandardsPanel from './components/StandardsPanel'
 
 const EXAMPLES = [
-  { label: 'Calculator', text: 'Ek simple calculator web app banao: + − × ÷, clear, backspace aur decimal support. Keyboard se bhi chale.' },
-  { label: 'To-do + login', text: "Ek To-Do list web app banao jisme user signup/login kare aur tasks add, delete aur 'complete' mark kar sake." },
-  { label: 'Blog', text: 'Ek blog platform banao jisme author posts likh, edit aur publish kar sake, aur readers comment kar sakein.' },
-  { label: 'Expense tracker', text: 'Ek expense tracker banao: expenses add karo category ke saath, monthly total aur category-wise breakdown dikhao.' },
+  { label: 'Calculator', blurb: 'Keyboard support, decimals, clean UI', text: 'Ek simple calculator web app banao: + − × ÷, clear, backspace aur decimal support. Keyboard se bhi chale.' },
+  { label: 'To-do + login', blurb: 'Auth, CRUD and a security review', text: "Ek To-Do list web app banao jisme user signup/login kare aur tasks add, delete aur 'complete' mark kar sake." },
+  { label: 'Blog', blurb: 'Posts, editing and comments', text: 'Ek blog platform banao jisme author posts likh, edit aur publish kar sake, aur readers comment kar sakein.' },
+  { label: 'Expense tracker', blurb: 'Categories and monthly totals', text: 'Ek expense tracker banao: expenses add karo category ke saath, monthly total aur category-wise breakdown dikhao.' },
 ]
 const LABEL = Object.fromEntries(STAGES.map((s) => [s.key, s.label]))
 
@@ -199,13 +199,14 @@ function App() {
     return () => window.removeEventListener('pagehide', onPageHide)
   }, [])
 
-  const handleGenerate = async () => {
+  // `text` lets an example card start a run in one click (state updates are async)
+  const handleGenerate = async (text = requirement) => {
     if (loading) return
-    if (requirement.trim().length < 10) { setError('Requirement thoda detail mein likho (kam se kam 10 characters).'); return }
+    if (text.trim().length < 10) { setError('Requirement thoda detail mein likho (kam se kam 10 characters).'); return }
     resetView()
     setLoading(true)
     try {
-      const { run_id: runId } = await startRun(requirement)
+      const { run_id: runId } = await startRun(text)
       setCurrentId(runId)
       setUrlRun(runId)
       listen(runId)
@@ -293,7 +294,7 @@ function App() {
             <div className="btn-row">
               <span className="dim small hint">⌘/Ctrl + Enter</span>
               {loading && <button className="btn-ghost" onClick={handleCancel}>Cancel</button>}
-              <button className="btn-primary" onClick={handleGenerate} disabled={loading}>
+              <button className="btn-primary" onClick={() => handleGenerate()} disabled={loading}>
                 {loading ? 'Running…' : 'Generate'}
               </button>
             </div>
@@ -329,6 +330,21 @@ function App() {
           ) : (
             <section className="panel empty">
               <h2>Describe an app, watch the team build it</h2>
+              <p className="dim">Write your own requirement on the left, or try one of these:</p>
+              <div className="example-cards">
+                {EXAMPLES.map((ex) => (
+                  <button
+                    key={ex.label}
+                    className="example-card"
+                    onClick={() => { setRequirement(ex.text); handleGenerate(ex.text) }}
+                  >
+                    <strong>{ex.label}</strong>
+                    <span className="dim small">{ex.blurb}</span>
+                    <span className="example-go">Run →</span>
+                  </button>
+                ))}
+              </div>
+              <h3 className="subhead">What you'll see</h3>
               <ul className="feature-list">
                 <li><strong>Live</strong> — every agent streams its work; code appears as it is typed.</li>
                 <li><strong>Parallel</strong> — independent agents run side by side, as the graph shows.</li>
