@@ -86,7 +86,8 @@ class CodeOutput(BaseModel):
 class Finding(BaseModel):
     issue: str
     severity: Level
-    location: str = Field(description="File and function/line the issue is in")
+    file: int = Field(description='Number N of the file the issue is in, from its "===== File #N" header; 0 if it is not specific to one file')
+    location: str = Field(description="Function/line the issue is in")
     suggestion: str
 
 

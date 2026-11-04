@@ -49,7 +49,7 @@ def wait_for(client, run_id, statuses, timeout=10):
 
 def test_health(client):
     body = client.get("/health").json()
-    assert body == {"success": True, "data": {"status": "ok", "rag": {"ready": True, "rules": 7}}}
+    assert body == {"success": True, "data": {"status": "ok", "rag": {"ready": True, "rules": 7, "source": "default"}}}
 
 
 @pytest.mark.parametrize("payload, field", [
@@ -75,7 +75,8 @@ def test_plan_success_and_llm_outage(client, fake_llm):
     fake_llm.fail_when = "Yeh raha requirement"
     r = client.post("/plan", json=REQ)
     assert r.status_code == 503
-    assert r.json() == {"success": False, "message": "The AI service is unavailable right now."}
+    body = r.json()
+    assert body["success"] is False and body["message"].startswith("The AI service is unavailable right now.")
 
 
 def test_unexpected_error_is_500_without_internals(client, fake_llm):
@@ -120,7 +121,7 @@ def test_finished_run_is_served_from_db_after_eviction(client):
     runs._runs.clear()   # as if evicted from memory / server restarted
 
     data = client.get(f"/runs/{run_id}").json()["data"]
-    assert data["status"] == "done" and data["result"]["tests"] == {"test_cases": []}
+    assert data["status"] == "done" and data["result"]["tests"]["test_cases"][0]["title"] == "signup works"
     assert client.get(f"/runs/{run_id}/events").status_code == 410
 
 
@@ -129,9 +130,9 @@ def test_failed_run_records_safe_message(client, fake_llm):
     run_id = client.post("/runs", json=REQ).json()["data"]["run_id"]
     events = sse_events(client, run_id)
     assert events[-1]["event"] == "failed"
-    assert events[-1]["data"]["message"] == "The AI service is unavailable right now."
+    assert events[-1]["data"]["message"].startswith("The AI service is unavailable right now.")
     data = wait_for(client, run_id, {"failed"})
-    assert data["error"] == "The AI service is unavailable right now."
+    assert data["error"].startswith("The AI service is unavailable right now.")
 
 
 def test_cancel_running_run(client, fake_llm):

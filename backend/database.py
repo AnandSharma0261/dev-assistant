@@ -11,7 +11,7 @@
 import os
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Column, DateTime, Integer, String, Text, create_engine, func, inspect, select, update
+from sqlalchemy import JSON, Column, DateTime, Integer, String, Text, create_engine, func, inspect, select, text, update
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -50,6 +50,23 @@ class Run(Base):
     report = Column(JSON)
     created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
     finished_at = Column(DateTime(timezone=True))
+    # Refinements: the run this one refines, and what the user asked for
+    parent_id = Column(String(32), index=True)
+    instruction = Column(Text)
+
+
+# Columns added after the first release. create_all() only creates missing
+# tables, never missing columns, so add them here. (A bigger project would
+# use Alembic migrations; this keeps the demo dependency-free.)
+_ADDED_COLUMNS = {"parent_id": "VARCHAR(32)", "instruction": "TEXT"}
+
+
+def _add_missing_columns():
+    existing = {c["name"] for c in inspect(engine).get_columns("runs")}
+    with engine.begin() as conn:
+        for name, sql_type in _ADDED_COLUMNS.items():
+            if name not in existing:
+                conn.execute(text(f"ALTER TABLE runs ADD COLUMN {name} {sql_type}"))
 
 
 class Project(Base):
@@ -65,6 +82,7 @@ class Project(Base):
 def init_db():
     """Create tables, migrate legacy history, and close out runs a restart interrupted."""
     Base.metadata.create_all(engine)
+    _add_missing_columns()
     with SessionLocal.begin() as db:
         if db.scalar(select(func.count()).select_from(Run)) == 0 and inspect(engine).has_table("projects"):
             for p in db.scalars(select(Project)):
@@ -79,9 +97,10 @@ def init_db():
         )
 
 
-def create_run(run_id, requirement):
+def create_run(run_id, requirement, parent_id=None, instruction=None):
     with SessionLocal.begin() as db:
-        db.add(Run(id=run_id, requirement=requirement, status="queued"))
+        db.add(Run(id=run_id, requirement=requirement, status="queued",
+                   parent_id=parent_id, instruction=instruction))
 
 
 def update_run(run_id, **fields):
@@ -104,6 +123,8 @@ def get_run(run_id):
             "status": r.status,
             "error": r.error,
             "result": r.report,
+            "parent_id": r.parent_id,
+            "instruction": r.instruction,
             "created_at": _iso(r.created_at),
             "finished_at": _iso(r.finished_at),
         }
@@ -114,14 +135,15 @@ def list_runs(limit=20, offset=0):
     with SessionLocal() as db:
         total = db.scalar(select(func.count()).select_from(Run))
         rows = db.execute(
-            select(Run.id, Run.requirement, Run.status, Run.created_at)
+            select(Run.id, Run.requirement, Run.status, Run.created_at, Run.parent_id, Run.instruction)
             .order_by(Run.created_at.desc())
             .limit(limit)
             .offset(offset)
         ).all()
     return {
         "items": [
-            {"id": r.id, "requirement": r.requirement, "status": r.status, "created_at": _iso(r.created_at)}
+            {"id": r.id, "requirement": r.requirement, "status": r.status, "created_at": _iso(r.created_at),
+             "parent_id": r.parent_id, "instruction": r.instruction}
             for r in rows
         ],
         "total": total,

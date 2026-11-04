@@ -23,7 +23,7 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
-from crew import run_crew
+from crew import refine_run, run_crew
 from database import create_run, get_run, update_run
 from gemini_helper import LLMUnavailable
 
@@ -42,10 +42,16 @@ class RunFinished(Exception):
     pass
 
 
+class ParentNotDone(Exception):
+    pass
+
+
 @dataclass
 class Run:
     id: str
     requirement: str
+    parent_id: str | None = None
+    instruction: str | None = None
     status: str = "queued"          # queued | running | done | failed | cancelled
     events: list = field(default_factory=list)
     result: dict | None = None
@@ -67,6 +73,8 @@ class Run:
         return {
             "id": self.id,
             "requirement": self.requirement,
+            "parent_id": self.parent_id,
+            "instruction": self.instruction,
             "status": self.status,
             "error": self.error,
             "result": self.result,
@@ -91,17 +99,34 @@ class RunStore:
         return run.snapshot() if run else get_run(run_id)
 
     async def create(self, requirement, max_dev_tasks):
-        """Record a run and start it in the background."""
+        """Record a full run and start it in the background."""
+        return await self._start(
+            Run(id=uuid.uuid4().hex, requirement=requirement),
+            lambda on_event: run_crew(requirement, max_dev_tasks, on_event=on_event),
+        )
+
+    async def refine(self, parent_id, instruction, target):
+        """Start a refinement of a finished run. Returns None if the parent is unknown."""
+        parent = self.snapshot(parent_id)
+        if not parent:
+            return None
+        if parent["status"] != "done" or not parent.get("result"):
+            raise ParentNotDone()
+        run = Run(id=uuid.uuid4().hex, requirement=parent["requirement"],
+                  parent_id=parent_id, instruction=instruction)
+        return await self._start(
+            run, lambda on_event: refine_run(parent["result"], instruction, target, on_event=on_event)
+        )
+
+    async def _start(self, run, job):
         active = sum(1 for r in self._runs.values() if not r.finished)
         if active >= MAX_ACTIVE_RUNS:
             raise TooManyRuns()
-
-        run = Run(id=uuid.uuid4().hex, requirement=requirement)
-        await asyncio.to_thread(create_run, run.id, requirement)
+        await asyncio.to_thread(create_run, run.id, run.requirement, run.parent_id, run.instruction)
         self._runs[run.id] = run
         self._evict()
         # Keep a reference to the task, otherwise it can be garbage-collected mid-run
-        run.task = asyncio.create_task(self._execute(run, max_dev_tasks))
+        run.task = asyncio.create_task(self._execute(run, job))
         run.task.add_done_callback(lambda t: self._on_task_done(run, t))
         return run
 
@@ -132,13 +157,13 @@ class RunStore:
             if self._runs[run_id].finished:
                 del self._runs[run_id]
 
-    async def _execute(self, run, max_dev_tasks):
+    async def _execute(self, run, job):
         run.status = "running"
         run.publish("status", {"status": "running"})
         await asyncio.to_thread(update_run, run.id, status="running")
         try:
             # The crew is async and runs on this event loop, so it can publish directly
-            result = await run_crew(run.requirement, max_dev_tasks, on_event=run.publish)
+            result = await job(run.publish)
         except Exception as e:
             logger.exception("Run %s failed", run.id)
             # Parallel stages run in TaskGroups, which wrap failures in ExceptionGroups

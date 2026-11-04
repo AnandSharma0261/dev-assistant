@@ -20,7 +20,7 @@ def test_independent_agents_run_in_parallel(fake_llm):
     start = time.perf_counter()
     run_crew()
     elapsed = time.perf_counter() - start
-    # 8 LLM calls; sequential would be ~2.4s. Critical path is 4 steps (~1.2s).
+    # 7 LLM calls (no fix round); sequential would be ~2.1s. Critical path is 4 steps (~1.2s).
     assert elapsed < 2.0, elapsed
 
 
@@ -42,12 +42,13 @@ def test_each_agent_gets_upstream_context(fake_llm):
     assert [d["task"] for d in result["dev_outputs"]] == ["T0", "T1"]  # plan order kept
     assert result["dev_outputs"][0]["language"] == "python"
     assert result["preview"]["html"].startswith("<!DOCTYPE html>")    # fences stripped
+    assert result["self_correction"] is None                         # clean review: no fix round
 
 
 def test_stage_events_cover_every_agent(fake_llm):
     _, events = run_crew()
     done = {e["stage"] for e in events if e["status"] == "done"}
-    assert done == {"planner", "architect", "developer", "preview", "reviewer", "qa"}
+    assert done == {"planner", "architect", "developer", "preview", "reviewer", "fix", "qa"}
     assert sum(1 for e in events if e["stage"] == "developer" and e["status"] == "progress") == 2
 
 

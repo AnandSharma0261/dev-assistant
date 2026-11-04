@@ -1,12 +1,10 @@
 // ============================================================
-//  Phase 7: Frontend — "Midnight IDE" theme
+//  Frontend — "Midnight IDE" theme
 //  Framer Motion (animations) + react-syntax-highlighter (code)
 // ============================================================
 
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 
 // fonts (npm package se — internet par depend nahi)
 import '@fontsource/inter/400.css'
@@ -16,76 +14,25 @@ import '@fontsource/jetbrains-mono/400.css'
 import '@fontsource/jetbrains-mono/700.css'
 
 import './App.css'
+import { cancelRun, eventsUrl, getRun, refineRun, startRun } from './api'
+import {
+  REFINE_STAGES, STAGES, STATUS_ICON, applyToResult, applyToStreams, emptyStreams, initialStages, stageStatus,
+} from './runEvents'
+import Results from './components/Results'
+import StandardsPanel from './components/StandardsPanel'
 
-// Local par localhost; deploy par Vercel mein VITE_API_URL set karenge (Render ka backend URL)
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const EXAMPLE = "Ek To-Do list web app banao jisme user task add, delete, aur 'complete' mark kar sake. User login/signup bhi ho."
-const STAGES = [
-  { key: 'planner', label: 'Planner' },
-  { key: 'architect', label: 'Architect' },
-  { key: 'developer', label: 'Developer' },
-  { key: 'preview', label: 'Preview' },
-  { key: 'reviewer', label: 'Reviewer' },
-  { key: 'qa', label: 'QA' },
-]
-// Which part of the report each stage's "done" event fills in
-const RESULT_KEY = { planner: 'plan', architect: 'design', preview: 'preview', reviewer: 'review', qa: 'tests' }
-
-// Generated prototypes are untrusted code. On top of the iframe sandbox
-// (no allow-same-origin => opaque origin: no access to our cookies, storage
-// or DOM), this CSP blocks every network request, so the code can't load
-// or send anything. Inline styles/scripts and data: images still work.
-const PREVIEW_CSP =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; form-action 'none'"
-
-function withCsp(html) {
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`
-  // The CSP meta must come before any script, so put it at the start of <head>
-  return /<head[^>]*>/i.test(html)
-    ? html.replace(/<head[^>]*>/i, (m) => `${m}${meta}`)
-    : `${meta}${html}`
-}
-const STATUS_ICON = { pending: '○', running: '◌', done: '✓', failed: '✕' }
-
-const initialStages = () => Object.fromEntries(STAGES.map((s) => [s.key, 'pending']))
-
-// Apply one SSE "stage" event to the partial report
-function applyStageEvent(result, { stage, status, data }) {
-  if (stage === 'developer' && status === 'progress') {
-    return { ...result, dev_outputs: [...(result.dev_outputs || []), data] }
-  }
-  if (status === 'done' && RESULT_KEY[stage] && data) {
-    return { ...result, [RESULT_KEY[stage]]: data }
-  }
-  return result
-}
-
-// Map the Developer's language id to a Prism grammar name
-const PRISM_ALIASES = { html: 'markup', xml: 'markup', svg: 'markup', js: 'javascript', ts: 'typescript', py: 'python', sh: 'bash', shell: 'bash' }
-function prismLanguage(lang) {
-  const key = (lang || 'javascript').toLowerCase()
-  return PRISM_ALIASES[key] || key
-}
-
-// Older reports stored code with markdown fences (```); strip them for display
-function cleanCode(raw) {
-  if (!raw) return ''
-  return raw.trim().replace(/^```[a-zA-Z]*\n?/, '').replace(/\n?```$/, '').trim()
-}
-
-// Framer Motion variants — results cards ek-ek karke (stagger) andar aayenge
-const container = { hidden: {}, show: { transition: { staggerChildren: 0.1 } } }
-const item = {
-  hidden: { opacity: 0, y: 24 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.5, ease: 'easeOut' } },
-}
 
 function App() {
   const [requirement, setRequirement] = useState('')
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState(null)
   const [stages, setStages] = useState(initialStages)
+  const [streams, setStreams] = useState(emptyStreams)
+  const [devTasks, setDevTasks] = useState([])
   const [devProgress, setDevProgress] = useState({ done: 0, total: 0 })
+  const [doneRunId, setDoneRunId] = useState(null)       // latest successful run (download / refine)
+  const [refineHistory, setRefineHistory] = useState([])
   const [error, setError] = useState('')
   const sourceRef = useRef(null)
   const runIdRef = useRef(null)   // the run in progress, if any
@@ -102,9 +49,7 @@ function App() {
   // keepalive lets the request finish even while the page is unloading.
   useEffect(() => {
     const onPageHide = () => {
-      if (runIdRef.current) {
-        fetch(`${API_URL}/runs/${runIdRef.current}`, { method: 'DELETE', keepalive: true }).catch(() => {})
-      }
+      if (runIdRef.current) cancelRun(runIdRef.current, { keepalive: true }).catch(() => {})
     }
     window.addEventListener('pagehide', onPageHide)
     return () => window.removeEventListener('pagehide', onPageHide)
@@ -114,6 +59,7 @@ function App() {
     runIdRef.current = null
     closeStream()
     setLoading(false)
+    setStreams(emptyStreams())
     if (errorMessage) {
       setError(errorMessage)
       setStages((s) => Object.fromEntries(
@@ -122,23 +68,39 @@ function App() {
     }
   }
 
-  // Subscribe to the run's live progress (Server-Sent Events)
+  // Subscribe to a run's live progress (Server-Sent Events)
   const listen = (runId) => {
-    const es = new EventSource(`${API_URL}/runs/${runId}/events`)
+    runIdRef.current = runId
+    const es = new EventSource(eventsUrl(runId))
     sourceRef.current = es
 
     es.addEventListener('stage', (e) => {
       const event = JSON.parse(e.data)
       const { stage, status, data } = event
-      const shown = status === 'done' || status === 'failed' ? status : 'running'
-      setStages((s) => ({ ...s, [stage]: shown }))
+      setStages((s) => ({ ...s, [stage]: stageStatus(event) }))
       if (stage === 'developer') {
-        if (status === 'started') setDevProgress({ done: 0, total: data?.total || 0 })
+        if (status === 'started') {
+          setDevTasks(data?.tasks || [])
+          setDevProgress({ done: 0, total: data?.total || 0 })
+        }
         if (status === 'progress') setDevProgress((p) => ({ ...p, done: p.done + 1 }))
       }
-      setResult((r) => applyStageEvent(r || {}, event))
+      if (status === 'delta' || status === 'progress' || status === 'done' || status === 'failed') {
+        setStreams((st) => applyToStreams(st, event))
+      }
+      if (status !== 'delta') setResult((r) => applyToResult(r || {}, event))
     })
-    es.addEventListener('done', () => finish())
+    es.addEventListener('done', async () => {
+      // The final report also carries the run metrics (timeline, tokens, cost)
+      try {
+        const run = await getRun(runId)
+        setResult(run.result)
+        setDoneRunId(runId)
+        finish()
+      } catch (e) {
+        finish(e.message)
+      }
+    })
     es.addEventListener('failed', (e) => finish(JSON.parse(e.data).message))
     es.addEventListener('cancelled', () => finish('Run cancelled.'))
     // Network blips: EventSource reconnects by itself (resuming via Last-Event-ID).
@@ -151,25 +113,28 @@ function App() {
   const handleGenerate = async () => {
     if (!requirement.trim()) { setError('Pehle requirement likho.'); return }
     closeStream()
-    setError(''); setLoading(true); setResult(null)
-    setStages(initialStages()); setDevProgress({ done: 0, total: 0 })
+    setError(''); setLoading(true); setResult(null); setDoneRunId(null); setRefineHistory([])
+    setStages(initialStages()); setStreams(emptyStreams()); setDevTasks([]); setDevProgress({ done: 0, total: 0 })
     try {
-      const res = await fetch(`${API_URL}/runs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requirement, max_dev_tasks: 2 }),
-      })
-      // API envelope: {success, data} or {success: false, message, errors?}
-      const json = await res.json().catch(() => ({}))
-      if (!res.ok || !json.success) {
-        const fieldErrors = (json.errors || []).map((e) => `${e.field}: ${e.message}`).join('; ')
-        finish([json.message || `Server error (${res.status})`, fieldErrors].filter(Boolean).join(' '))
-        return
-      }
-      runIdRef.current = json.data.run_id
-      listen(json.data.run_id)
+      const { run_id: runId } = await startRun(requirement)
+      listen(runId)
     } catch (e) {
-      finish('Error: ' + e.message + ' — backend chal raha hai? (port 8000)')
+      finish(e.message)
+    }
+  }
+
+  const handleRefine = async (instruction, target) => {
+    if (!doneRunId) return
+    setError(''); setLoading(true)
+    // Only the refined part re-runs; every other stage keeps the parent's result
+    const rerun = REFINE_STAGES[target]
+    setStages((s) => Object.fromEntries(Object.keys(s).map((k) => [k, rerun.includes(k) ? 'pending' : s[k]])))
+    try {
+      const { run_id: runId } = await refineRun(doneRunId, instruction, target)
+      setRefineHistory((h) => [...h, { instruction, target }])
+      listen(runId)
+    } catch (e) {
+      finish(e.message)
     }
   }
 
@@ -177,8 +142,11 @@ function App() {
     const runId = runIdRef.current
     if (!runId) return
     // The server confirms with a "cancelled" SSE event, which calls finish()
-    const res = await fetch(`${API_URL}/runs/${runId}`, { method: 'DELETE' }).catch(() => null)
-    if (res && res.status === 409) finish()   // it had already finished
+    try {
+      await cancelRun(runId)
+    } catch (e) {
+      if (e.status === 409) finish()   // it had already finished
+    }
   }
 
   const showPipeline = loading || Object.values(stages).some((s) => s !== 'pending')
@@ -196,7 +164,7 @@ function App() {
           <span className="brand-mark">◆</span>
           <h1>dev<span className="accent">.assistant</span></h1>
         </div>
-        <p className="tagline">// requirement → plan · design · code · preview · review · tests</p>
+        <p className="tagline">// requirement → plan · design · code · preview · review · fix · tests</p>
       </motion.header>
 
       {/* ---- Input panel ---- */}
@@ -231,6 +199,7 @@ function App() {
           </motion.button>
         </div>
         {error && <p className="error">{error}</p>}
+        <StandardsPanel disabled={loading} />
       </motion.section>
 
       {/* ---- Live agent pipeline (driven by SSE stage events) ---- */}
@@ -249,6 +218,7 @@ function App() {
                     className={`stage stage-${status}`}
                     animate={status === 'running' ? { opacity: [0.5, 1, 0.5] } : { opacity: 1 }}
                     transition={status === 'running' ? { duration: 1.2, repeat: Infinity } : { duration: 0.2 }}
+                    title={status === 'skipped' ? 'No high-severity findings, so nothing to fix' : undefined}
                   >
                     <span className="stage-icon">{STATUS_ICON[status]}</span> {label}
                     {key === 'developer' && devProgress.total > 0 && status !== 'pending' && (
@@ -261,7 +231,7 @@ function App() {
             {loading && (
               <p className="loader-text">
                 {(() => {
-                  // Several agents can run at once (parallel Developer tasks, Reviewer + QA)
+                  // Several agents can run at once (parallel Developer tasks, Preview, Reviewer + QA)
                   const running = STAGES.filter(({ key }) => stages[key] === 'running').map((s) => s.label)
                   if (running.length === 0) return 'Run shuru ho raha hai…'
                   return running.length === 1
@@ -274,161 +244,19 @@ function App() {
         )}
       </AnimatePresence>
 
-      {/* ---- Results (each section appears as soon as its agent finishes) ---- */}
-      {result && <Results data={result} />}
-    </div>
-  )
-}
-
-// ============================================================
-//  LivePreview — runs the Preview agent's HTML in a locked-down iframe
-// ============================================================
-function LivePreview({ html }) {
-  const [showCode, setShowCode] = useState(false)
-  const frameRef = useRef(null)
-  const srcDoc = withCsp(html)
-
-  return (
-    <motion.section className="card" variants={item}>
-      <div className="preview-head">
-        <h2><span className="h-mark">▸</span> Live Preview</h2>
-        <div className="preview-actions">
-          <button className="btn-ghost" onClick={() => setShowCode((v) => !v)}>
-            {showCode ? 'Preview' : 'Code'}
-          </button>
-          <button className="btn-ghost" onClick={() => frameRef.current?.requestFullscreen?.()}>
-            Full screen
-          </button>
-        </div>
-      </div>
-      {showCode ? (
-        <SyntaxHighlighter
-          language="markup"
-          style={oneDark}
-          customStyle={{ borderRadius: 12, fontSize: 13, margin: 0, background: '#0d1117', maxHeight: 520 }}
-        >
-          {html}
-        </SyntaxHighlighter>
-      ) : (
-        <iframe
-          ref={frameRef}
-          className="preview-frame"
-          title="Generated app preview"
-          sandbox="allow-scripts allow-modals"
-          srcDoc={srcDoc}
+      {/* ---- Results (each section appears as soon as its agent has output) ---- */}
+      {result && (
+        <Results
+          data={result}
+          streams={streams}
+          devTasks={devTasks}
+          runId={doneRunId}
+          busy={loading}
+          onRefine={handleRefine}
+          refineHistory={refineHistory}
         />
       )}
-      <p className="dim preview-note">
-        Prototype runs in a sandbox: no network, no backend, data lives in memory.
-      </p>
-    </motion.section>
-  )
-}
-
-// ============================================================
-//  Results — saari report sections, stagger animation ke saath
-// ============================================================
-function Results({ data }) {
-  return (
-    <motion.div className="results" variants={container} initial="hidden" animate="show">
-      {/* Live preview of the generated prototype */}
-      {data.preview?.html && <LivePreview html={data.preview.html} />}
-
-      {/* Plan */}
-      {data.plan && <motion.section className="card" variants={item}>
-        <h2><span className="h-mark">▸</span> Plan</h2>
-        <ul className="task-list">
-          {data.plan?.tasks?.map((t) => (
-            <li key={t.id}>
-              <span className={`badge ${t.priority?.toLowerCase()}`}>{t.priority}</span>
-              <strong>{t.title}</strong>
-              <div className="dim">{t.description}</div>
-            </li>
-          ))}
-        </ul>
-      </motion.section>}
-
-      {/* Architecture */}
-      {data.design && <motion.section className="card" variants={item}>
-        <h2><span className="h-mark">▸</span> Architecture</h2>
-        <div className="stack">
-          {data.design?.tech_stack &&
-            Object.entries(data.design.tech_stack).map(([k, v]) => (
-              <div key={k} className="stack-item">
-                <span className="stack-key">{k}</span>
-                <span>{Array.isArray(v) ? v.join(', ') : v}</span>
-              </div>
-            ))}
-        </div>
-      </motion.section>}
-
-      {/* Generated code */}
-      {data.dev_outputs?.length > 0 && <motion.section className="card" variants={item}>
-        <h2><span className="h-mark">▸</span> Generated Code</h2>
-        {data.dev_outputs?.map((d, i) => (
-          // index + task: separate tasks can pick the same filename (e.g. server.js)
-          <div key={`${i}-${d.task}`} className="code-block">
-            <div className="code-title">
-              {d.filename ? <span className="code-file">{d.filename}</span> : null}
-              <span className="dim">{d.task}{d.language ? ` · ${d.language}` : ''}</span>
-            </div>
-            <SyntaxHighlighter
-              language={prismLanguage(d.language)}
-              style={oneDark}
-              customStyle={{ borderRadius: 12, fontSize: 13, margin: 0, background: '#0d1117' }}
-            >
-              {cleanCode(d.code)}
-            </SyntaxHighlighter>
-            {d.notes && <p className="dim code-notes">ℹ {d.notes}</p>}
-          </div>
-        ))}
-      </motion.section>}
-
-      {/* Review */}
-      {data.review && <motion.section className="card" variants={item}>
-        <h2><span className="h-mark">▸</span> Code Review</h2>
-        <ul className="findings">
-          {data.review?.findings?.map((f, i) => (
-            <li key={i}>
-              <span className={`badge ${f.severity?.toLowerCase()}`}>{f.severity}</span>
-              <strong>{f.issue}</strong>
-              {f.location && <div className="dim mono">{f.location}</div>}
-              <div className="dim">💡 {f.suggestion}</div>
-            </li>
-          ))}
-        </ul>
-        {data.review?.standards_check?.length > 0 && (
-          <>
-            <h3 className="subhead">Company standards</h3>
-            <ul className="standards">
-              {data.review.standards_check.map((c) => (
-                <li key={c.standard} className={`standard-${c.status}`}>
-                  <span className="standard-icon">{c.status === 'pass' ? '✓' : '✕'}</span>
-                  <strong>{c.standard}</strong>
-                  <span className="dim"> — {c.note}</span>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-        {data.review?.overall_summary && (
-          <p className="summary">{data.review.overall_summary}</p>
-        )}
-      </motion.section>}
-
-      {/* Tests */}
-      {data.tests && <motion.section className="card" variants={item}>
-        <h2><span className="h-mark">▸</span> Test Cases</h2>
-        <ul className="test-list">
-          {data.tests?.test_cases?.map((tc) => (
-            <li key={tc.id}>
-              <strong>{tc.title}</strong>
-              <div className="dim">✅ {tc.expected}</div>
-            </li>
-          ))}
-        </ul>
-      </motion.section>}
-    </motion.div>
+    </div>
   )
 }
 
