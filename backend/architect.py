@@ -4,39 +4,30 @@
 #  (tech stack, components, data models, API endpoints)
 # ============================================================
 
-from gemini_helper import ask_gemini_json
+import asyncio
+
+from gemini_helper import ask_gemini_structured
+from planner import make_plan
+from schemas import Design
 
 
 ARCHITECT_ROLE = """
 Tum ek experienced Software Architect ho.
-Tumhe ek software requirement milegi. Uske liye ek saaf system design banao.
-
-Sirf JSON do, bilkul is format mein:
-{
-  "tech_stack": {
-    "frontend": "...",
-    "backend": "...",
-    "database": "...",
-    "other": ["...", "..."]
-  },
-  "components": [
-    {"name": "...", "responsibility": "1 line"}
-  ],
-  "data_models": [
-    {"name": "...", "fields": ["field1", "field2"]}
-  ],
-  "api_endpoints": [
-    {"method": "GET/POST/...", "path": "/...", "purpose": "1 line"}
-  ]
-}
-Practical aur modern choices suggest karo.
+Tumhe ek software requirement aur Planner ke banaye development tasks milenge.
+Uske liye ek saaf system design banao: tech stack, main components, data models,
+aur API endpoints. Design aisa ho ki har planned task usse implement ho sake.
+Responsibility aur purpose 1 line mein. Practical aur modern choices suggest karo.
 """
 
 
-def design_system(requirement):
-    """Requirement le kar system design (Python dict) return karta hai."""
-    prompt = f"Requirement:\n\n{requirement}\n\nIske liye system design banao."
-    return ask_gemini_json(prompt, system_instruction=ARCHITECT_ROLE)
+async def design_system(requirement, plan):
+    """Requirement + Planner ka plan le kar validated Design return karta hai."""
+    prompt = (
+        f"Requirement:\n\n{requirement}\n\n"
+        f"Planned tasks:\n{plan.as_prompt()}\n\n"
+        "Iske liye system design banao."
+    )
+    return await ask_gemini_structured(prompt, Design, system_instruction=ARCHITECT_ROLE)
 
 
 if __name__ == "__main__":
@@ -45,20 +36,21 @@ if __name__ == "__main__":
         "aur 'complete' mark kar sake. User login/signup bhi hona chahiye."
     )
     print("⏳ Architect Agent design soch raha hai...\n")
-    design = design_system(requirement)
+    plan = asyncio.run(make_plan(requirement))
+    design = asyncio.run(design_system(requirement, plan))
 
     print("🏛️  TECH STACK:")
-    for key, val in design["tech_stack"].items():
+    for key, val in design.tech_stack.model_dump().items():
         print(f"   - {key}: {val}")
 
     print("\n🧩 COMPONENTS:")
-    for c in design["components"]:
-        print(f"   - {c['name']}: {c['responsibility']}")
+    for c in design.components:
+        print(f"   - {c.name}: {c.responsibility}")
 
     print("\n🗄️  DATA MODELS:")
-    for m in design["data_models"]:
-        print(f"   - {m['name']} ({', '.join(m['fields'])})")
+    for m in design.data_models:
+        print(f"   - {m.name} ({', '.join(m.fields)})")
 
     print("\n🔌 API ENDPOINTS:")
-    for a in design["api_endpoints"]:
-        print(f"   - {a['method']} {a['path']} → {a['purpose']}")
+    for a in design.api_endpoints:
+        print(f"   - {a.method} {a.path} → {a.purpose}")
