@@ -51,6 +51,7 @@ class FakeLLM:
         self.fail_with = server_error()
         self.cancelled = []
         self.preview_html = RAW_PREVIEW
+        self.preview_queue = []      # Preview answers returned in order (then preview_html)
         self.reviews = []            # Review objects returned in order (then a clean review)
         self.stream_fail_once = set()  # kinds whose first streamed attempt dies mid-way
 
@@ -86,7 +87,7 @@ class FakeLLM:
 
     def answer(self, schema, prompt, kind):
         if kind == "Preview":
-            return self.preview_html
+            return self.preview_queue.pop(0) if self.preview_queue else self.preview_html
         if kind == "PreviewRefine":
             return "<!DOCTYPE html><html><body>refined</body></html>"
         if schema is s.Plan:

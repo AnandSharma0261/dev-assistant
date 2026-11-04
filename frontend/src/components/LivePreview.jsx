@@ -21,6 +21,14 @@ function withCsp(html) {
 // it from the final HTML, so hide it from the live stream too
 const stripFence = (text) => text.replace(/^\s*```[a-z]*\s*\n?/i, '').replace(/\n?```\s*$/, '')
 
+// Same check as the backend (previewer.external_resources): files the CSP blocks
+const EXTERNAL_RE = /<(?:script|link)\b[^>]*\b(?:src|href)\s*=\s*["']?((?:https?:)?\/\/[^"'\s>]+)|@import\s+(?:url\()?["']?((?:https?:)?\/\/[^"')\s;]+)|url\(\s*["']?((?:https?:)?\/\/[^"')\s]+)/gi
+function externalResources(html) {
+  const found = new Set()
+  for (const m of (html || '').matchAll(EXTERNAL_RE)) found.add(m[1] || m[2] || m[3])
+  return [...found]
+}
+
 const DEVICES = [
   { key: 'desktop', label: 'Desktop', width: '100%' },
   { key: 'tablet', label: 'Tablet', width: '768px' },
@@ -28,13 +36,14 @@ const DEVICES = [
 ]
 
 /** Runs the Preview agent's HTML in a locked-down iframe; shows the HTML while it streams. */
-export default function LivePreview({ html, streaming }) {
+export default function LivePreview({ html, streaming, onFixExternal }) {
   const [showCode, setShowCode] = useState(false)
   const [device, setDevice] = useState('desktop')
   const [reloadKey, setReloadKey] = useState(0)
   const frameRef = useRef(null)
   const live = streaming != null
   const width = DEVICES.find((d) => d.key === device).width
+  const external = live ? [] : externalResources(html)
 
   return (
     <div className="preview">
@@ -59,6 +68,17 @@ export default function LivePreview({ html, streaming }) {
           </>
         )}
       </div>
+      {external.length > 0 && (
+        <div className="callout callout-warning" role="status">
+          <div>
+            This prototype loads external files ({external.slice(0, 2).map((u) => u.replace(/^(https?:)?\/\//, '').split('/')[0]).join(', ')}),
+            which the sandbox blocks, so it may look unstyled or not work.
+          </div>
+          {onFixExternal && (
+            <button className="btn-ghost btn-sm" onClick={onFixExternal}>Fix: inline the styles</button>
+          )}
+        </div>
+      )}
       {live || showCode ? (
         <SyntaxHighlighter language="markup" style={oneDark} customStyle={codeStyle} codeTagProps={codeTagProps}>
           {live ? stripFence(streaming) + '▍' : html}

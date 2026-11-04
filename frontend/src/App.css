@@ -267,6 +267,11 @@ pre code { background: none; border: 0; padding: 0; }
 
 .callout { border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; }
 .callout-success { border: 1px solid color-mix(in srgb, var(--success) 35%, transparent); background: var(--success-soft); }
+.callout-warning {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between;
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent); background: var(--warning-soft);
+  color: var(--text-bright); font-size: 13.5px; margin-bottom: 0;
+}
 .callout-title { font-size: 13.5px; color: var(--text-bright); margin-bottom: 10px; }
 .sc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-bottom: 8px; }
 .sc-item { display: flex; flex-direction: column; gap: 1px; font-size: 13.5px; color: var(--text-bright); }

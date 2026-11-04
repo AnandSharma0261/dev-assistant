@@ -23,6 +23,9 @@ Strict rules:
 - Sirf ek complete HTML document do, <!DOCTYPE html> se shuru. Koi explanation nahi.
 - Saara CSS <style> mein aur saara JS <script> mein — inline. Koi external file,
   CDN, font, image URL ya fetch/XHR NAHI (network blocked hai, kuch load nahi hoga).
+- Tailwind, Bootstrap, Google Fonts, icon libraries — inme se kuch bhi <script src>
+  ya <link href> se mat lao; woh load nahi honge aur page bina style ke dikhega.
+  Plain CSS khud likho (system fonts, inline SVG icons).
 - Koi backend nahi hai: data JS memory mein rakho. Login/signup jaisi cheezein
   in-memory fake data se simulate karo. localStorage/sessionStorage/cookies use mat
   karo (sandbox mein blocked hain).
@@ -31,6 +34,26 @@ Strict rules:
 """
 
 _HTML_RE = re.compile(r"<!DOCTYPE html.*</html>|<html.*</html>", re.IGNORECASE | re.DOTALL)
+
+
+# <script src="http…"> / <link href="//…"> / @import / url(http…): anything the
+# sandbox CSP would block, leaving the prototype unstyled or broken
+_EXTERNAL_RE = re.compile(
+    r"""<(?:script|link)\b[^>]*\b(?:src|href)\s*=\s*["']?((?:https?:)?//[^"'\s>]+)"""
+    r"""|@import\s+(?:url\()?["']?((?:https?:)?//[^"')\s;]+)"""
+    r"""|url\(\s*["']?((?:https?:)?//[^"')\s]+)""",
+    re.IGNORECASE,
+)
+
+
+def external_resources(html):
+    """External URLs the prototype tries to load (they are blocked in the sandbox)."""
+    found = []
+    for m in _EXTERNAL_RE.finditer(html or ""):
+        url = next(g for g in m.groups() if g)
+        if url not in found:
+            found.append(url)
+    return found
 
 
 def extract_html(text):
@@ -50,7 +73,29 @@ async def build_prototype(requirement, plan=None, design=None, on_text=None):
     if design:
         prompt += f"\n\n--- SYSTEM DESIGN (UI isse consistent ho) ---\n{design.as_prompt()}"
     prompt += "\n\nIska working prototype ek single HTML file mein banao."
-    return extract_html(await ask_gemini(prompt, system_instruction=PREVIEW_ROLE, on_text=on_text))
+    return await _generate_self_contained(prompt, on_text)
+
+
+async def _generate_self_contained(prompt, on_text):
+    """
+    Generate the HTML; if it loads external files (e.g. the Tailwind CDN), which
+    the sandbox blocks, ask once more with the offending URLs named. Returns the
+    best HTML we got; the UI warns if external files are still referenced.
+    """
+    html = extract_html(await ask_gemini(prompt, system_instruction=PREVIEW_ROLE, on_text=on_text))
+    external = external_resources(html)
+    if not external:
+        return html
+    if on_text:
+        on_text("")   # the retry streams from scratch
+    retry = (
+        f"{prompt}\n\n--- PICHLA JAWAB GALAT THA ---\n"
+        f"Usme ye external files thi: {', '.join(external[:5])}. Preview sandbox mein network band hai, "
+        "isliye ye load nahi hongi aur page bina style/JS ke dikhega. Inke bina poora HTML dobara do: "
+        "saara CSS <style> mein khud likho, saara JS <script> mein."
+    )
+    fixed = extract_html(await ask_gemini(retry, system_instruction=PREVIEW_ROLE, on_text=on_text))
+    return fixed if len(external_resources(fixed)) < len(external) else html
 
 
 async def refine_prototype(html, instruction, requirement=None, on_text=None):
@@ -62,9 +107,11 @@ async def refine_prototype(html, instruction, requirement=None, on_text=None):
         f"Yeh current prototype hai:\n\n{html}\n\n"
         f"--- USER KA CHANGE REQUEST ---\n{instruction}\n\n"
         "Ye change karo aur poora updated HTML document do. Jo kaam kar raha hai use mat todo; "
-        "sab rules (single file, inline CSS/JS, no network, no storage) wahi rahenge."
+        "sab rules (single file, inline CSS/JS, no network, no storage) wahi rahenge. "
+        "Agar current prototype koi external CSS/JS (jaise Tailwind CDN) load karta hai, to use hata kar "
+        "wahi styling plain CSS mein <style> ke andar likho."
     )
-    return extract_html(await ask_gemini(prompt, system_instruction=PREVIEW_ROLE, on_text=on_text))
+    return await _generate_self_contained(prompt, on_text)
 
 
 if __name__ == "__main__":
