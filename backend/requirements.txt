@@ -5,9 +5,6 @@
 google-genai        # Google Gemini ka official SDK
 python-dotenv       # .env se secret keys padhne ke liye
 
-# --- Agents / Orchestration (Phase 4) ---
-crewai              # multi-agent framework (Agent/Task/Crew)
-
 # --- RAG / Vector DB (Phase 5) ---
 chromadb            # local vector database (semantic search)
 

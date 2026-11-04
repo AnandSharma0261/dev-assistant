@@ -2,13 +2,17 @@
 #  gemini_helper.py
 #  Ek reusable "helper" — hamare SAARE agents isi ke through
 #  Gemini se baat karenge. Ek hi jagah connection + retry logic.
+#
+#  Async: uses the SDK's async client (client.aio), so many agent calls
+#  can be in flight at once without tying up a thread each, and retry
+#  waits use asyncio.sleep instead of blocking with time.sleep.
 # ============================================================
 
+import asyncio
 import os
-import time
-import json
 
 from dotenv import load_dotenv
+from pydantic import ValidationError
 from google import genai
 from google.genai import types
 
@@ -32,19 +36,26 @@ MODELS = [
     "gemini-2.0-flash-lite",   # aur ek fallback
 ]
 
+# Agents now run in parallel. Cap how many Gemini calls are in flight at once
+# (across all runs) so a burst doesn't trip the free tier's per-minute limit.
+MAX_CONCURRENT_CALLS = int(os.getenv("GEMINI_MAX_CONCURRENCY", "4"))
+_limiter = asyncio.Semaphore(MAX_CONCURRENT_CALLS)
 
-def _generate(prompt, system_instruction=None, as_json=False, retries=6):
+
+async def _generate(prompt, system_instruction=None, schema=None, retries=6):
     """
     Andar ka asli kaam karne wala function.
     - prompt              = humara sawaal
     - system_instruction  = agent ka ROLE (jaise "tum planner ho")
-    - as_json             = True ho to Gemini se saaf JSON maangte hain
+    - schema              = Pydantic model. Given => Gemini is constrained to this
+                            JSON shape (response_schema) and we return a validated
+                            instance of it instead of raw text.
     - retries             = busy (503) hone par kitni baar dobara try karein
     """
     config = types.GenerateContentConfig(
         system_instruction=system_instruction,
-        # JSON maangne par Gemini hamesha valid JSON hi dega
-        response_mime_type="application/json" if as_json else None,
+        response_mime_type="application/json" if schema else None,
+        response_schema=schema,
     )
 
     last_err = None
@@ -53,12 +64,26 @@ def _generate(prompt, system_instruction=None, as_json=False, retries=6):
     for model in MODELS:
         for attempt in range(1, retries + 1):
             try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=config,
-                )
-                return response.text  # mil gaya — yahीं return
+                async with _limiter:
+                    response = await client.aio.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                        config=config,
+                    )
+                if schema is None:
+                    return response.text
+                if not response.text:
+                    # Blocked or truncated response: nothing to parse
+                    raise ValueError("Empty response from model")
+                return schema.model_validate_json(response.text)
+            except (ValidationError, ValueError) as e:
+                # Output didn't match the schema (rare with response_schema, but
+                # possible on truncation). Retry immediately, no backoff needed.
+                last_err = e
+                print(f"⚠️  '{model}' returned invalid output (attempt {attempt}/{retries}): {e}")
+                if attempt == retries:
+                    break
+                continue
             except Exception as e:
                 last_err = e
                 msg = str(e)
@@ -75,7 +100,8 @@ def _generate(prompt, system_instruction=None, as_json=False, retries=6):
                     break
                 wait = attempt * 2
                 print(f"⚠️  '{model}' busy (attempt {attempt}/{retries}). {wait}s baad retry...")
-                time.sleep(wait)
+                # Sleep outside the limiter so a waiting retry doesn't hold a slot
+                await asyncio.sleep(wait)
 
     # Saare models fail/exhausted ho gaye
     raise RuntimeError(
@@ -84,12 +110,11 @@ def _generate(prompt, system_instruction=None, as_json=False, retries=6):
     )
 
 
-def ask_gemini(prompt, system_instruction=None):
+async def ask_gemini(prompt, system_instruction=None):
     """Normal text jawab chahiye to ye use karo."""
-    return _generate(prompt, system_instruction, as_json=False)
+    return await _generate(prompt, system_instruction)
 
 
-def ask_gemini_json(prompt, system_instruction=None):
-    """JSON (structured data) chahiye to ye use karo — Python object return karta hai."""
-    text = _generate(prompt, system_instruction, as_json=True)
-    return json.loads(text)  # JSON text ko Python dict/list mein badal do
+async def ask_gemini_structured(prompt, schema, system_instruction=None):
+    """Structured output: returns a validated instance of the `schema` Pydantic model."""
+    return await _generate(prompt, system_instruction, schema=schema)

@@ -1,11 +1,23 @@
 # ============================================================
 #  Phase 4: Crew (Orchestrator)
-#  Kaam: paanchon agents ko ek TEAM ki tarah sahi order mein
-#  chalana, aur ek agent ka output agle ko context dena.
+#  Kaam: paanchon agents ko ek TEAM ki tarah chalana, aur har agent ko
+#  pichle agents ka output context ke roop mein dena.
 #
-#  Flow: Planner -> Architect -> Developer -> Reviewer -> QA
+#  Dependency graph (what each agent needs decides what can run in parallel):
+#
+#    Planner ──▶ Architect ──▶ Developer × N ──┬──▶ Reviewer
+#   (requirement) (+plan)    (parallel; task + │   (code + design + standards)
+#                             design + RAG)    └──▶ QA
+#                                                  (plan + endpoints + code)
+#
+#  Architect waits for the plan so the design covers every task (a
+#  deliberate trade: better context over running it alongside the Planner).
+#  The Developer tasks are independent, so they run concurrently, and so do
+#  Reviewer and QA, since neither needs the other's output.
+#  Needs Python 3.11+ (asyncio.TaskGroup).
 # ============================================================
 
+import asyncio
 import os
 
 # Apne banaye huye agents ko import karte hain (har file se uska function)
@@ -17,70 +29,99 @@ from qa import generate_tests
 from rag import search_standards  # Phase 5: company coding standards dhoondne ke liye
 
 
-def run_crew(requirement, max_dev_tasks=2):
+def _noop(event_type, data):
+    pass
+
+
+async def run_crew(requirement, max_dev_tasks=2, on_event=None):
     """
-    Poori AI team ko chalata hai aur ek final report (text) banata hai.
+    Poori AI team ko chalata hai aur final report (dict) return karta hai.
     max_dev_tasks = Developer kitni top tasks ka code likhe (demo fast rakhne ke liye)
+    on_event      = optional callback(event_type, data). Each stage reports
+                    started / progress / done through it, so callers (the API's
+                    SSE stream) can show real progress instead of a spinner.
     """
+    emit = on_event or _noop
+
+    def stage(name, status, data=None):
+        emit("stage", {"stage": name, "status": status, "data": data})
 
     # ---------- STEP 1: PLANNER ----------
-    print("📋 [1/5] Planner: requirement ko tasks mein tod raha hai...")
-    plan = make_plan(requirement)
-    tasks = plan["tasks"]
-    print(f"     ✅ {len(tasks)} tasks bane\n")
+    print("📋 Planner: requirement ko tasks mein tod raha hai...")
+    stage("planner", "started")
+    plan = await make_plan(requirement)
+    stage("planner", "done", plan.model_dump())
+    print(f"     ✅ {len(plan.tasks)} tasks bane")
 
-    # ---------- STEP 2: ARCHITECT ----------
-    print("🏛️  [2/5] Architect: system design bana raha hai...")
-    design = design_system(requirement)
-    stack = design["tech_stack"]
-    # Design ka chhota summary — ye DEVELOPER ko context ke roop mein denge
-    design_context = (
-        f"Frontend: {stack.get('frontend')}, "
-        f"Backend: {stack.get('backend')}, "
-        f"Database: {stack.get('database')}."
-    )
-    backend_lang = stack.get("backend", "JavaScript")
-    print(f"     ✅ Design ready ({design_context})\n")
+    # ---------- STEP 2: ARCHITECT (gets the plan) ----------
+    print("🏛️  Architect: system design bana raha hai...")
+    stage("architect", "started")
+    design = await design_system(requirement, plan)
+    design_context = design.as_prompt()
+    backend_lang = design.tech_stack.backend or "JavaScript"
+    stage("architect", "done", design.model_dump())
+    print(f"     ✅ Design ready (backend: {backend_lang})")
 
-    # ---------- STEP 3: DEVELOPER ----------
-    # Har top task ke liye code likhwate hain — aur design ka context bhi dete hain
-    print(f"👨‍💻 [3/5] Developer: top {max_dev_tasks} tasks ka code likh raha hai...")
-    dev_outputs = []
-    for t in tasks[:max_dev_tasks]:
-        # YAHAN context pass ho raha hai: task + architect ka design
-        task_with_context = (
-            f"{t['title']}: {t['description']}\n\n"
-            f"Project design context: {design_context}"
+    # ---------- STEP 3: DEVELOPER × N (parallel) ----------
+    dev_tasks = plan.tasks[:max_dev_tasks]
+    print(f"👨‍💻 Developer: {len(dev_tasks)} tasks ka code parallel mein likh raha hai...")
+    stage("developer", "started", {"total": len(dev_tasks)})
+
+    async def develop(t):
+        # RAG lookup is local CPU work (embeddings), so keep it off the event loop
+        standards = await asyncio.to_thread(search_standards, f"{t.title} {t.description}")
+        code = await write_code(
+            f"{t.title}: {t.description}",
+            language=backend_lang,
+            standards=standards,
+            design_context=design_context,
         )
-        # Phase 5 (RAG): is task se related company standards ChromaDB se dhoondo
-        standards = search_standards(f"{t['title']} {t['description']}", n=4)
-        # ...aur Developer ko de do taaki code company rules follow kare
-        code = write_code(task_with_context, language=backend_lang, standards=standards)
-        dev_outputs.append({"task": t["title"], "code": code})
-        print(f"     ✅ '{t['title']}' ka code ban gaya (RAG standards ke saath)")
-    print()
+        output = {"task": t.title, "code": code}
+        stage("developer", "progress", output)   # reported as each one finishes
+        print(f"     ✅ '{t.title}' ka code ban gaya ({len(standards)} standards ke saath)")
+        return output, standards
 
-    # Saare code ko ek jagah jod do — ye REVIEWER ko denge
-    combined_code = "\n\n".join(d["code"] for d in dev_outputs)
+    # TaskGroup (not gather): if one task fails, the others are cancelled
+    # instead of running on and burning quota for a run that already failed.
+    async with asyncio.TaskGroup() as tg:
+        dev_jobs = [tg.create_task(develop(t)) for t in dev_tasks]
+    results = [job.result() for job in dev_jobs]
+    dev_outputs = [out for out, _ in results]   # gather keeps the plan's task order
+    stage("developer", "done")
 
-    # ---------- STEP 4: REVIEWER ----------
-    print("🔍 [4/5] Reviewer: Developer ke code ko check kar raha hai...")
-    review = review_code(combined_code)
-    print(f"     ✅ {len(review['findings'])} findings mile\n")
+    # Every standard any Developer was given — the Reviewer checks compliance with them
+    used_standards = list(dict.fromkeys(rule for _, rules in results for rule in rules))
+    combined_code = "\n\n".join(f"// ===== Task: {d['task']} =====\n{d['code']}" for d in dev_outputs)
 
-    # ---------- STEP 5: QA ----------
-    print("🧪 [5/5] QA: test cases bana raha hai...")
-    tests = generate_tests(requirement)
-    print(f"     ✅ {len(tests['test_cases'])} test cases bane\n")
+    # ---------- STEP 4 + 5: REVIEWER and QA (parallel) ----------
+    async def run_review():
+        stage("reviewer", "started")
+        review = await review_code(combined_code, design_context=design_context, standards=used_standards)
+        stage("reviewer", "done", review.model_dump())
+        print(f"     ✅ Reviewer: {len(review.findings)} findings")
+        return review
 
-    # Sab kuch ek dictionary mein wapas bhej do
+    async def run_qa():
+        stage("qa", "started")
+        tests = await generate_tests(requirement, plan=plan, design=design, code=combined_code)
+        stage("qa", "done", tests.model_dump())
+        print(f"     ✅ QA: {len(tests.test_cases)} test cases")
+        return tests
+
+    print("🔍🧪 Reviewer + QA parallel mein chal rahe hain...")
+    async with asyncio.TaskGroup() as tg:
+        review_job = tg.create_task(run_review())
+        qa_job = tg.create_task(run_qa())
+    review, tests = review_job.result(), qa_job.result()
+
+    # Plain dict (JSON-serialisable) — DB mein save hota hai aur API se jaata hai
     return {
         "requirement": requirement,
-        "plan": plan,
-        "design": design,
+        "plan": plan.model_dump(),
+        "design": design.model_dump(),
         "dev_outputs": dev_outputs,
-        "review": review,
-        "tests": tests,
+        "review": review.model_dump(),
+        "tests": tests.model_dump(),
     }
 
 
@@ -132,7 +173,7 @@ if __name__ == "__main__":
     print("🚀 AI CREW START — poori team kaam shuru kar rahi hai")
     print("=" * 55, "\n")
 
-    result = run_crew(requirement, max_dev_tasks=2)
+    result = asyncio.run(run_crew(requirement, max_dev_tasks=2))
 
     # Report ko file mein save karo
     out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")

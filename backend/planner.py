@@ -4,7 +4,10 @@
 #  (Jaise ek Project Manager karta hai)
 # ============================================================
 
-from gemini_helper import ask_gemini_json
+import asyncio
+
+from gemini_helper import ask_gemini_structured
+from schemas import Plan
 
 
 # ---- Agent ka ROLE / personality (system instruction) ----
@@ -18,20 +21,14 @@ development tasks mein todna.
 Rules:
 - Har task choti aur "actionable" honi chahiye (ek banda usse seedha kar sake).
 - Tasks logical order mein hon: pehle setup, phir core features, phir testing.
-- Sirf aur sirf JSON do, bilkul is format mein:
-{
-  "tasks": [
-    {"id": 1, "title": "chhota title", "description": "1-2 line mein kya karna hai", "priority": "High"}
-  ]
-}
-priority sirf "High", "Medium", ya "Low" ho.
+- title chhota ho, description 1-2 line ki.
 """
 
 
-def make_plan(requirement):
-    """Requirement (text) le kar tasks ki list (Python dict) return karta hai."""
+async def make_plan(requirement):
+    """Requirement (text) le kar validated Plan return karta hai."""
     prompt = f"Yeh raha requirement:\n\n{requirement}\n\nIske liye development tasks banao."
-    return ask_gemini_json(prompt, system_instruction=PLANNER_ROLE)
+    return await ask_gemini_structured(prompt, Plan, system_instruction=PLANNER_ROLE)
 
 
 # ---- Ye hissa tabhi chalta hai jab file ko SEEDHA run karein ----
@@ -45,9 +42,9 @@ if __name__ == "__main__":
     print("📥 Requirement:", requirement, "\n")
     print("⏳ Planner Agent soch raha hai...\n")
 
-    plan = make_plan(requirement)
+    plan = asyncio.run(make_plan(requirement))
 
     print("📋 Planner Agent ne ye tasks banaye:\n")
-    for t in plan["tasks"]:
-        print(f"  [{t['id']}] ({t['priority']}) {t['title']}")
-        print(f"       → {t['description']}\n")
+    for t in plan.tasks:
+        print(f"  [{t.id}] ({t.priority}) {t.title}")
+        print(f"       → {t.description}\n")

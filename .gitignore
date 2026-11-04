@@ -9,6 +9,9 @@ backend/chroma_db/
 # SQLite database file (data — repo mein nahi jaata)
 backend/app.db
 
+# Generated reports (python crew.py)
+backend/output/
+
 # Secrets — ye kabhi kisi ke saath share/upload nahi karte
 .env
 backend/.env
