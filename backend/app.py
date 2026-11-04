@@ -8,12 +8,15 @@
 # ============================================================
 
 import asyncio
+import hmac
 import logging
+import os
+import re
 from contextlib import asynccontextmanager
 
 from typing import Annotated
 
-from fastapi import FastAPI, Header, HTTPException, Path, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -105,14 +108,54 @@ async def catch_unhandled(request, call_next):
 
 
 # ---- CORS ----
-# Browser security ke kaaran, frontend (alag port par) ko backend call karne ki
-# permission chahiye. CORS middleware wahi permission deta hai.
+# In Docker the frontend's nginx proxies /api to this server (same origin, no
+# CORS needed). For local development any localhost port is allowed; a
+# deployed frontend on another domain is listed in CORS_ORIGINS
+# (comma-separated, e.g. https://my-app.vercel.app).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---- Who is asking ----
+# There are no user accounts. Each browser makes a random id once and sends
+# it as X-Session-Id (or ?session= where headers can't be set). It scopes
+# history, cancel and refine to that browser. Reading one run by its id
+# (report, events, ZIP) needs no session: run ids are random UUIDs, so a run
+# link works like an unlisted share link.
+_SESSION_RE = re.compile(r"^[A-Za-z0-9-]{16,64}$")
+
+
+def session_id(
+    x_session_id: Annotated[str | None, Header()] = None,
+    session: Annotated[str | None, Query(include_in_schema=False)] = None,
+):
+    sid = x_session_id or session
+    if not sid or not _SESSION_RE.match(sid):
+        raise HTTPException(status_code=400, detail="Missing or invalid X-Session-Id header.")
+    return sid
+
+
+Session = Annotated[str, Depends(session_id)]
+
+
+def _require_owner(run_id, sid):
+    # A run you don't own looks the same as one that doesn't exist
+    if runs.owner(run_id) != sid:
+        raise HTTPException(status_code=404, detail="Run not found.")
+
+
+def require_admin(x_admin_token: Annotated[str | None, Header()] = None):
+    """Changing the coding standards affects every user, so it needs ADMIN_TOKEN."""
+    expected = os.getenv("ADMIN_TOKEN")
+    if not expected:
+        raise HTTPException(status_code=403, detail="Uploading standards is disabled on this server (no ADMIN_TOKEN set).")
+    if not x_admin_token or not hmac.compare_digest(x_admin_token, expected):
+        raise HTTPException(status_code=401, detail="Invalid admin token.")
 
 
 # ---- Request ka shape (body kaisa aayega) ----
@@ -162,23 +205,23 @@ async def plan(body: RequirementIn):
 # ---- Runs: full crew as a background job + live progress over SSE ----
 
 @app.post("/runs", status_code=202)
-async def create_run(body: RequirementIn):
+async def create_run(body: RequirementIn, sid: Session):
     """
     Starts the full crew (Planner -> Architect -> Developer(RAG) ∥ Preview -> Reviewer ∥ QA)
     in the background and returns immediately with a run id.
     Progress: GET /runs/{id}/events (SSE). Final state: GET /runs/{id}.
     """
     try:
-        run = await runs.create(body.requirement, body.max_dev_tasks)
+        run = await runs.create(body.requirement, body.max_dev_tasks, session_id=sid)
     except TooManyRuns:
         raise HTTPException(status_code=429, detail="Too many runs in progress. Try again shortly.")
     return ok({"run_id": run.id, "status": run.status})
 
 
 @app.get("/runs")
-def list_all_runs(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)):
-    """History: runs newest first (without reports), paginated."""
-    return ok(list_runs(limit=limit, offset=offset))
+def list_all_runs(sid: Session, limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)):
+    """This browser's history: runs newest first (without reports), paginated."""
+    return ok(list_runs(sid, limit=limit, offset=offset))
 
 
 @app.get("/runs/{run_id}")
@@ -191,8 +234,9 @@ def get_run(run_id: RunId):
 
 
 @app.delete("/runs/{run_id}", status_code=202)
-def cancel_run(run_id: RunId):
+def cancel_run(run_id: RunId, sid: Session):
     """Cancel a queued/running run. Its in-flight Gemini calls are cancelled too."""
+    _require_owner(run_id, sid)
     try:
         run = runs.cancel(run_id)
     except RunFinished:
@@ -227,7 +271,7 @@ async def run_events(run_id: RunId, request: Request, last_event_id: str | None 
 
 
 @app.post("/runs/{run_id}/refine", status_code=202)
-async def refine(run_id: RunId, body: RefineIn):
+async def refine(run_id: RunId, body: RefineIn, sid: Session):
     """
     Follow-up on a finished run ("make the buttons round"). Starts a new run that
     reuses the parent's plan and design and regenerates only `target`
@@ -235,7 +279,8 @@ async def refine(run_id: RunId, body: RefineIn):
     Stream it like any run: GET /runs/{new_id}/events.
     """
     try:
-        run = await runs.refine(run_id, body.instruction, body.target)
+        _require_owner(run_id, sid)
+        run = await runs.refine(run_id, body.instruction, body.target, session_id=sid)
     except ParentNotDone:
         raise HTTPException(status_code=409, detail="Only a finished, successful run can be refined.")
     except TooManyRuns:
@@ -264,23 +309,25 @@ def download(run_id: RunId):
 
 @app.get("/standards")
 def get_standards():
-    """The active standards document (built-in or uploaded) and the rules it was split into."""
-    return ok(rag.describe())
+    """The active standards document (built-in or uploaded) and the rules it was split into.
+    `editable` says whether this server accepts uploads (ADMIN_TOKEN is set)."""
+    return ok({**rag.describe(), "editable": bool(os.getenv("ADMIN_TOKEN"))})
 
 
-@app.put("/standards")
+@app.put("/standards", dependencies=[Depends(require_admin)])
 async def upload_standards(body: StandardsIn):
     """
     Replace the coding standards with your own Markdown/text document and re-index it.
     Use "## Heading" per rule; end a heading with "[always]" for rules that apply to every file.
     """
     try:
-        return ok(await asyncio.to_thread(rag.set_custom_standards, body.content))
+        info = await asyncio.to_thread(rag.set_custom_standards, body.content)
+        return ok({**info, "editable": True})
     except rag.InvalidStandards as e:
         raise HTTPException(status_code=422, detail=str(e))
 
 
-@app.delete("/standards")
+@app.delete("/standards", dependencies=[Depends(require_admin)])
 async def reset_standards():
     """Go back to the built-in standards."""
-    return ok(await asyncio.to_thread(rag.reset_standards))
+    return ok({**await asyncio.to_thread(rag.reset_standards), "editable": True})

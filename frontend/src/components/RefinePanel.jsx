@@ -6,9 +6,9 @@ const TARGETS = [
 ]
 
 /** Follow-up request on a finished run: regenerates only the chosen part. */
-export default function RefinePanel({ onRefine, disabled, history }) {
+export default function RefinePanel({ onRefine, disabled, history, initialTarget = 'preview' }) {
   const [instruction, setInstruction] = useState('')
-  const [target, setTarget] = useState('preview')
+  const [target, setTarget] = useState(initialTarget)
   const hint = TARGETS.find((t) => t.key === target).hint
 
   const submit = (e) => {
@@ -21,7 +21,7 @@ export default function RefinePanel({ onRefine, disabled, history }) {
   return (
     <form className="refine" onSubmit={submit}>
       <div className="refine-head">
-        <span className="label">$ refine</span>
+        <label className="label" htmlFor="refine-input">Refine this result</label>
         <div className="segmented" role="radiogroup" aria-label="What to change">
           {TARGETS.map((t) => (
             <button
@@ -39,7 +39,8 @@ export default function RefinePanel({ onRefine, disabled, history }) {
       </div>
       <div className="refine-row">
         <input
-          className="refine-input"
+          id="refine-input"
+          className="input"
           placeholder={hint}
           value={instruction}
           maxLength={2000}

@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app as app_module
+from conftest import OTHER_SESSION, SESSION
 from runs import runs
 
 REQ = {"requirement": "Todo app with login and signup", "max_dev_tasks": 2}
@@ -15,7 +16,7 @@ REQ = {"requirement": "Todo app with login and signup", "max_dev_tasks": 2}
 @pytest.fixture
 def client(fake_llm):
     runs._runs.clear()
-    with TestClient(app_module.app) as c:
+    with TestClient(app_module.app, headers={"X-Session-Id": SESSION}) as c:
         yield c
 
 
@@ -166,3 +167,42 @@ def test_too_many_concurrent_runs(client, fake_llm):
     assert r.status_code == 429 and r.json()["success"] is False
     for run_id in ids:
         client.delete(f"/runs/{run_id}")
+
+
+# ---- sessions: history, cancel and refine are per browser ----
+
+def test_session_is_required_and_validated(client):
+    assert client.post("/runs", json=REQ, headers={"X-Session-Id": ""}).status_code == 400
+    assert client.post("/runs", json=REQ, headers={"X-Session-Id": "short"}).status_code == 400
+    assert client.get("/runs", headers={"X-Session-Id": "bad id with spaces!!"}).status_code == 400
+    assert client.get(f"/runs?session={SESSION}", headers={"X-Session-Id": ""}).status_code == 200
+
+
+def test_other_sessions_cannot_list_cancel_or_refine(client, fake_llm):
+    fake_llm.delay = 1.0
+    run_id = client.post("/runs", json=REQ).json()["data"]["run_id"]
+    other = {"X-Session-Id": OTHER_SESSION}
+
+    assert client.get("/runs", headers=other).json()["data"]["items"] == []
+    assert client.delete(f"/runs/{run_id}", headers=other).status_code == 404
+    assert client.post(f"/runs/{run_id}/refine", json={"instruction": "do it"}, headers=other).status_code == 404
+    # ...but the run link itself is shareable (read-only)
+    assert client.get(f"/runs/{run_id}", headers=other).status_code == 200
+
+    assert [i["id"] for i in client.get("/runs").json()["data"]["items"]][0] == run_id
+    assert client.delete(f"/runs/{run_id}").status_code == 202
+
+
+def test_cors_allows_localhost_and_configured_origins_only(client):
+    def preflight(origin):
+        return client.options("/runs", headers={"Origin": origin, "Access-Control-Request-Method": "POST",
+                                               "Access-Control-Request-Headers": "x-session-id,content-type"})
+    assert preflight("http://localhost:5175").headers.get("access-control-allow-origin") == "http://localhost:5175"
+    assert "access-control-allow-origin" not in preflight("https://evil.example").headers
+
+
+def test_postgres_urls_are_normalised():
+    from database import _normalise_url
+    assert _normalise_url("postgres://u:p@h:5432/d") == "postgresql+psycopg://u:p@h:5432/d"
+    assert _normalise_url("postgresql://u:p@h/d") == "postgresql+psycopg://u:p@h/d"
+    assert _normalise_url("sqlite:///x.db") == "sqlite:///x.db"

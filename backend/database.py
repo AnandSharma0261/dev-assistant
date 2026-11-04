@@ -5,7 +5,8 @@
 #  failed runs are on record too.
 #
 #  DATABASE_URL sets the database (default: SQLite file next to this module).
-#  Postgres works with just a different URL.
+#  Postgres: DATABASE_URL=postgresql://user:pass@host/db (hosts like Render give
+#  "postgres://..." URLs; both are accepted and use the psycopg driver).
 # ============================================================
 
 import os
@@ -15,12 +16,22 @@ from sqlalchemy import JSON, Column, DateTime, Integer, String, Text, create_eng
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-DB_URL = os.getenv("DATABASE_URL", f"sqlite:///{os.path.join(BASE, 'app.db')}")
+
+
+def _normalise_url(url):
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    return url
+
+
+DB_URL = _normalise_url(os.getenv("DATABASE_URL", f"sqlite:///{os.path.join(BASE, 'app.db')}"))
 
 # check_same_thread=False => SQLite connection ko multiple threads use kar sakein
 engine = create_engine(
     DB_URL,
     connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {},
+    pool_pre_ping=True,   # survive the DB dropping idle connections (common on hosted Postgres)
 )
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 Base = declarative_base()
@@ -53,12 +64,14 @@ class Run(Base):
     # Refinements: the run this one refines, and what the user asked for
     parent_id = Column(String(32), index=True)
     instruction = Column(Text)
+    # Anonymous browser session that created the run: scopes history, cancel and refine
+    session_id = Column(String(64), index=True)
 
 
 # Columns added after the first release. create_all() only creates missing
 # tables, never missing columns, so add them here. (A bigger project would
 # use Alembic migrations; this keeps the demo dependency-free.)
-_ADDED_COLUMNS = {"parent_id": "VARCHAR(32)", "instruction": "TEXT"}
+_ADDED_COLUMNS = {"parent_id": "VARCHAR(32)", "instruction": "TEXT", "session_id": "VARCHAR(64)"}
 
 
 def _add_missing_columns():
@@ -97,10 +110,16 @@ def init_db():
         )
 
 
-def create_run(run_id, requirement, parent_id=None, instruction=None):
+def create_run(run_id, requirement, parent_id=None, instruction=None, session_id=None):
     with SessionLocal.begin() as db:
         db.add(Run(id=run_id, requirement=requirement, status="queued",
-                   parent_id=parent_id, instruction=instruction))
+                   parent_id=parent_id, instruction=instruction, session_id=session_id))
+
+
+def run_owner(run_id):
+    """Session id that created the run, or None (unknown run / legacy run)."""
+    with SessionLocal() as db:
+        return db.scalar(select(Run.session_id).where(Run.id == run_id))
 
 
 def update_run(run_id, **fields):
@@ -130,12 +149,14 @@ def get_run(run_id):
         }
 
 
-def list_runs(limit=20, offset=0):
-    """Newest first, without the (large) report column."""
+def list_runs(session_id, limit=20, offset=0):
+    """One session's runs, newest first, without the (large) report column."""
     with SessionLocal() as db:
-        total = db.scalar(select(func.count()).select_from(Run))
+        mine = Run.session_id == session_id
+        total = db.scalar(select(func.count()).select_from(Run).where(mine))
         rows = db.execute(
             select(Run.id, Run.requirement, Run.status, Run.created_at, Run.parent_id, Run.instruction)
+            .where(mine)
             .order_by(Run.created_at.desc())
             .limit(limit)
             .offset(offset)

@@ -39,4 +39,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 
 # `exec` replaces the shell, so uvicorn is PID 1 and receives SIGTERM directly
 # (graceful shutdown). PORT is set by cloud hosts like Render; default 8000.
+# Keep ONE worker: runs and their live SSE events live in this process's
+# memory, so a second worker couldn't stream a run the first one started.
+# Scale out with a shared queue (Redis + ARQ/Celery) instead.
 CMD ["sh", "-c", "exec uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
