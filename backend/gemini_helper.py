@@ -29,12 +29,15 @@ client = genai.Client(api_key=_api_key)
 # Free models ki LIST (fallback order). Pehla try hoga; agar uska daily quota
 # khatam (429) ho jaaye to system APNE AAP agle model par switch kar jaayega.
 # Isse effective quota badh jaata hai (har model ka alag free limit hota hai).
-MODELS = [
-    "gemini-2.5-flash-lite",   # sabse halka — pehle ye
-    "gemini-2.5-flash",        # iska bhi apna alag quota
-    "gemini-2.0-flash",        # extra fallback (kuch keys par available)
-    "gemini-2.0-flash-lite",   # aur ek fallback
+# Override without a code change: GEMINI_MODELS=model-a,model-b
+# (2.x models return 404 for new keys, so they are no longer in the default list.)
+DEFAULT_MODELS = [
+    "gemini-3.5-flash-lite",     # sabse halka/sasta — pehle ye
+    "gemini-3.5-flash",          # iska apna alag quota
+    "gemini-flash-lite-latest",  # alias: Google keeps it pointed at a current model
+    "gemini-flash-latest",
 ]
+MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "").split(",") if m.strip()] or DEFAULT_MODELS
 
 # Agents now run in parallel. Cap how many Gemini calls are in flight at once
 # (across all runs) so a burst doesn't trip the free tier's per-minute limit.
