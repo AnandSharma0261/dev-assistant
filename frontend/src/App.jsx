@@ -60,7 +60,14 @@ function applyStageEvent(result, { stage, status, data }) {
   return result
 }
 
-// Developer ke code se markdown fences (```) hatao taaki saaf highlight ho
+// Map the Developer's language id to a Prism grammar name
+const PRISM_ALIASES = { html: 'markup', xml: 'markup', svg: 'markup', js: 'javascript', ts: 'typescript', py: 'python', sh: 'bash', shell: 'bash' }
+function prismLanguage(lang) {
+  const key = (lang || 'javascript').toLowerCase()
+  return PRISM_ALIASES[key] || key
+}
+
+// Older reports stored code with markdown fences (```); strip them for display
 function cleanCode(raw) {
   if (!raw) return ''
   return raw.trim().replace(/^```[a-zA-Z]*\n?/, '').replace(/\n?```$/, '').trim()
@@ -81,6 +88,7 @@ function App() {
   const [devProgress, setDevProgress] = useState({ done: 0, total: 0 })
   const [error, setError] = useState('')
   const sourceRef = useRef(null)
+  const runIdRef = useRef(null)   // the run in progress, if any
 
   const closeStream = () => {
     sourceRef.current?.close()
@@ -90,7 +98,20 @@ function App() {
   // Close the SSE connection if the component unmounts mid-run
   useEffect(() => closeStream, [])
 
+  // Leaving the page cancels the run in progress, so it stops using LLM quota.
+  // keepalive lets the request finish even while the page is unloading.
+  useEffect(() => {
+    const onPageHide = () => {
+      if (runIdRef.current) {
+        fetch(`${API_URL}/runs/${runIdRef.current}`, { method: 'DELETE', keepalive: true }).catch(() => {})
+      }
+    }
+    window.addEventListener('pagehide', onPageHide)
+    return () => window.removeEventListener('pagehide', onPageHide)
+  }, [])
+
   const finish = (errorMessage) => {
+    runIdRef.current = null
     closeStream()
     setLoading(false)
     if (errorMessage) {
@@ -119,6 +140,7 @@ function App() {
     })
     es.addEventListener('done', () => finish())
     es.addEventListener('failed', (e) => finish(JSON.parse(e.data).message))
+    es.addEventListener('cancelled', () => finish('Run cancelled.'))
     // Network blips: EventSource reconnects by itself (resuming via Last-Event-ID).
     // It only gives up (CLOSED) on a hard failure such as a 404.
     es.onerror = () => {
@@ -137,15 +159,26 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requirement, max_dev_tasks: 2 }),
       })
+      // API envelope: {success, data} or {success: false, message, errors?}
       const json = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        finish(json.detail || `Server error (${res.status})`)
+      if (!res.ok || !json.success) {
+        const fieldErrors = (json.errors || []).map((e) => `${e.field}: ${e.message}`).join('; ')
+        finish([json.message || `Server error (${res.status})`, fieldErrors].filter(Boolean).join(' '))
         return
       }
-      listen(json.run_id)
+      runIdRef.current = json.data.run_id
+      listen(json.data.run_id)
     } catch (e) {
       finish('Error: ' + e.message + ' — backend chal raha hai? (port 8000)')
     }
+  }
+
+  const handleCancel = async () => {
+    const runId = runIdRef.current
+    if (!runId) return
+    // The server confirms with a "cancelled" SSE event, which calls finish()
+    const res = await fetch(`${API_URL}/runs/${runId}`, { method: 'DELETE' }).catch(() => null)
+    if (res && res.status === 409) finish()   // it had already finished
   }
 
   const showPipeline = loading || Object.values(stages).some((s) => s !== 'pending')
@@ -163,7 +196,7 @@ function App() {
           <span className="brand-mark">◆</span>
           <h1>dev<span className="accent">.assistant</span></h1>
         </div>
-        <p className="tagline">// requirement → plan · design · code · review · tests</p>
+        <p className="tagline">// requirement → plan · design · code · preview · review · tests</p>
       </motion.header>
 
       {/* ---- Input panel ---- */}
@@ -182,9 +215,11 @@ function App() {
           onChange={(e) => setRequirement(e.target.value)}
         />
         <div className="btn-row">
-          <button className="btn-ghost" onClick={() => setRequirement(EXAMPLE)} disabled={loading}>
-            Try Example
-          </button>
+          {loading ? (
+            <button className="btn-ghost" onClick={handleCancel}>Cancel</button>
+          ) : (
+            <button className="btn-ghost" onClick={() => setRequirement(EXAMPLE)}>Try Example</button>
+          )}
           <motion.button
             className="btn-primary"
             onClick={handleGenerate}
@@ -331,15 +366,20 @@ function Results({ data }) {
       {data.dev_outputs?.length > 0 && <motion.section className="card" variants={item}>
         <h2><span className="h-mark">▸</span> Generated Code</h2>
         {data.dev_outputs?.map((d, i) => (
-          <div key={i} className="code-block">
-            <div className="code-title">{d.task}</div>
+          // index + task: separate tasks can pick the same filename (e.g. server.js)
+          <div key={`${i}-${d.task}`} className="code-block">
+            <div className="code-title">
+              {d.filename ? <span className="code-file">{d.filename}</span> : null}
+              <span className="dim">{d.task}{d.language ? ` · ${d.language}` : ''}</span>
+            </div>
             <SyntaxHighlighter
-              language="javascript"
+              language={prismLanguage(d.language)}
               style={oneDark}
               customStyle={{ borderRadius: 12, fontSize: 13, margin: 0, background: '#0d1117' }}
             >
               {cleanCode(d.code)}
             </SyntaxHighlighter>
+            {d.notes && <p className="dim code-notes">ℹ {d.notes}</p>}
           </div>
         ))}
       </motion.section>}
@@ -352,10 +392,25 @@ function Results({ data }) {
             <li key={i}>
               <span className={`badge ${f.severity?.toLowerCase()}`}>{f.severity}</span>
               <strong>{f.issue}</strong>
+              {f.location && <div className="dim mono">{f.location}</div>}
               <div className="dim">💡 {f.suggestion}</div>
             </li>
           ))}
         </ul>
+        {data.review?.standards_check?.length > 0 && (
+          <>
+            <h3 className="subhead">Company standards</h3>
+            <ul className="standards">
+              {data.review.standards_check.map((c) => (
+                <li key={c.standard} className={`standard-${c.status}`}>
+                  <span className="standard-icon">{c.status === 'pass' ? '✓' : '✕'}</span>
+                  <strong>{c.standard}</strong>
+                  <span className="dim"> — {c.note}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
         {data.review?.overall_summary && (
           <p className="summary">{data.review.overall_summary}</p>
         )}

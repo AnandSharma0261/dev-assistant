@@ -220,3 +220,15 @@
   background: #fff;   /* generated apps assume a normal page background */
 }
 .preview-note { font-size: 12px; margin-top: 8px; }
+
+/* ---- Structured code + standards checklist ---- */
+.code-title { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.code-file { font-family: var(--mono); color: var(--text-bright); }
+.code-notes { font-size: 12px; margin: 8px 0 0; }
+.mono { font-family: var(--mono); font-size: 12px; }
+.subhead { font-size: 14px; margin: 22px 0 10px; color: var(--text-bright); }
+.standards { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.standards li { font-size: 14px; }
+.standard-icon { display: inline-block; width: 22px; font-weight: 700; }
+.standard-pass .standard-icon { color: #22c55e; }
+.standard-fail .standard-icon { color: #ef4444; }

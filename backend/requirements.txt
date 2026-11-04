@@ -1,16 +1,20 @@
-# Multi-Agent Dev Assistant — Python dependencies
-# Install: venv/bin/pip install -r requirements.txt
+# Multi-Agent Dev Assistant — Python dependencies (Python 3.11+)
+# Versions are pinned so builds are reproducible. Install:
+#   venv/bin/pip install -r requirements.txt          (app)
+#   venv/bin/pip install -r requirements-dev.txt      (app + tests)
 
 # --- LLM (Gemini se baat) ---
-google-genai        # Google Gemini ka official SDK
-python-dotenv       # .env se secret keys padhne ke liye
+google-genai==2.34.0      # Google Gemini ka official SDK
+python-dotenv==1.2.4      # .env se secret keys padhne ke liye
+httpx==0.28.1             # HTTP client (SDK transport; network errors are retried)
 
-# --- RAG / Vector DB (Phase 5) ---
-chromadb            # local vector database (semantic search)
+# --- RAG / Vector DB ---
+chromadb==1.5.9           # local vector database (semantic search)
 
-# --- Backend API (Phase 6) ---
-fastapi             # web API framework
-uvicorn[standard]   # FastAPI app ko chalane wala server (engine)
+# --- Backend API ---
+fastapi==0.162.0          # web API framework
+uvicorn[standard]==0.54.0 # ASGI server
+pydantic==2.12.5          # request validation + agent output schemas
 
-# --- Database (Phase 8) ---
-sqlalchemy          # ORM — Python class <-> database table
+# --- Database ---
+sqlalchemy==2.1.8         # ORM — Python class <-> database table

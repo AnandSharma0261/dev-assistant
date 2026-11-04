@@ -7,7 +7,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 Level = Literal["High", "Medium", "Low"]
 
@@ -74,15 +74,31 @@ class Design(BaseModel):
         return "\n".join(lines)
 
 
+# ---- Developer ----
+class CodeOutput(BaseModel):
+    language: str = Field(description="Lowercase language id for syntax highlighting, e.g. javascript, typescript, python, html, css, java, go, sql, bash")
+    filename: str = Field(description="Suggested path for this file, e.g. src/routes/auth.js")
+    code: str = Field(description="The complete file contents. Plain code, no markdown fences.")
+    notes: str = Field(description="1-2 lines: assumptions made, or how to run/use it")
+
+
 # ---- Reviewer ----
 class Finding(BaseModel):
     issue: str
     severity: Level
+    location: str = Field(description="File and function/line the issue is in")
     suggestion: str
+
+
+class StandardCheck(BaseModel):
+    standard: str = Field(description="Name of the company coding standard")
+    status: Literal["pass", "fail"]
+    note: str = Field(description="Evidence: where it is followed or violated")
 
 
 class Review(BaseModel):
     findings: list[Finding]
+    standards_check: list[StandardCheck]
     overall_summary: str
 
 

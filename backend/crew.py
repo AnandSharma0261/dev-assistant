@@ -71,13 +71,13 @@ async def run_crew(requirement, max_dev_tasks=2, on_event=None):
     async def develop(t):
         # RAG lookup is local CPU work (embeddings), so keep it off the event loop
         standards = await asyncio.to_thread(search_standards, f"{t.title} {t.description}")
-        code = await write_code(
+        out = await write_code(
             f"{t.title}: {t.description}",
             language=backend_lang,
             standards=standards,
             design_context=design_context,
         )
-        output = {"task": t.title, "code": code}
+        output = {"task": t.title, **out.model_dump()}   # task, language, filename, code, notes
         stage("developer", "progress", output)   # reported as each one finishes
         print(f"     ✅ '{t.title}' ka code ban gaya ({len(standards)} standards ke saath)")
         return output, standards
@@ -114,7 +114,9 @@ async def run_crew(requirement, max_dev_tasks=2, on_event=None):
 
     # Every standard any Developer was given — the Reviewer checks compliance with them
     used_standards = list(dict.fromkeys(rule for _, rules in results for rule in rules))
-    combined_code = "\n\n".join(f"// ===== Task: {d['task']} =====\n{d['code']}" for d in dev_outputs)
+    combined_code = "\n\n".join(
+        f"===== File: {d['filename']} (task: {d['task']}) =====\n{d['code']}" for d in dev_outputs
+    )
 
     # ---------- STEP 4 + 5: REVIEWER and QA (parallel) ----------
     async def run_review():
@@ -169,8 +171,8 @@ def save_report(result, path):
 
     lines.append("## 👨‍💻 Generated Code\n")
     for d in r["dev_outputs"]:
-        lines.append(f"### {d['task']}\n")
-        lines.append(d["code"])
+        lines.append(f"### {d['task']} — `{d['filename']}`\n")
+        lines.append(f"```{d['language']}\n{d['code']}\n```")
         lines.append("")
 
     lines.append("## 🔍 Code Review\n")

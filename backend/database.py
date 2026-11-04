@@ -1,87 +1,130 @@
 # ============================================================
-#  Phase 8: Database (SQLAlchemy + SQLite)
-#  Har processed requirement + uski report ko permanently save karta hai.
+#  Phase 8: Database (SQLAlchemy)
+#  Every run is stored with its status (queued / running / done / failed /
+#  cancelled), error and final report, so history survives restarts and
+#  failed runs are on record too.
+#
+#  DATABASE_URL sets the database (default: SQLite file next to this module).
+#  Postgres works with just a different URL.
 # ============================================================
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import create_engine, Column, Integer, Text, JSON, DateTime
+from sqlalchemy import JSON, Column, DateTime, Integer, String, Text, create_engine, func, inspect, select, update
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-
 BASE = os.path.dirname(os.path.abspath(__file__))
+DB_URL = os.getenv("DATABASE_URL", f"sqlite:///{os.path.join(BASE, 'app.db')}")
 
-# DB ka "pata". sqlite:///...app.db  => ek file 'app.db' mein sab save hoga.
-# (Baad mein Postgres chahiye to sirf ye URL badlega, baaki code same.)
-DB_URL = f"sqlite:///{os.path.join(BASE, 'app.db')}"
-
-# engine = database se asli connection
-# check_same_thread=False => FastAPI ke multiple requests ke liye zaroori (SQLite ke saath)
-engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
-
-# SessionLocal = har baar DB se baat karne ke liye ek "session" (baat-cheet) banata hai
-SessionLocal = sessionmaker(bind=engine, autoflush=False)
-
-# Base = saari table-models ka parent
+# check_same_thread=False => SQLite connection ko multiple threads use kar sakein
+engine = create_engine(
+    DB_URL,
+    connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {},
+)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 Base = declarative_base()
 
+FINISHED = ("done", "failed", "cancelled")
 
-# ---- TABLE MODEL ----
-# Ye Python class = database mein 'projects' naam ki table.
-# Har attribute = table ka ek column.
+
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
+def _iso(dt):
+    if dt is None:
+        return None
+    if dt.tzinfo is None:          # SQLite drops tzinfo; values are stored in UTC
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+class Run(Base):
+    __tablename__ = "runs"
+
+    id = Column(String(32), primary_key=True)
+    requirement = Column(Text, nullable=False)
+    status = Column(String(16), nullable=False, index=True)
+    error = Column(Text)
+    report = Column(JSON)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
+    finished_at = Column(DateTime(timezone=True))
+
+
 class Project(Base):
+    """Legacy table (before runs were tracked). Only read once, to migrate old history."""
     __tablename__ = "projects"
 
-    id = Column(Integer, primary_key=True, index=True)   # har row ka unique number
-    requirement = Column(Text, nullable=False)           # user ne kya maanga
-    report = Column(JSON)                                # poori AI report (JSON)
-    created_at = Column(DateTime, default=datetime.utcnow)  # kab bani
+    id = Column(Integer, primary_key=True)
+    requirement = Column(Text, nullable=False)
+    report = Column(JSON)
+    created_at = Column(DateTime)
 
 
 def init_db():
-    """Tables banao (agar pehle se nahi hain). Ek baar app start par chalta hai."""
+    """Create tables, migrate legacy history, and close out runs a restart interrupted."""
     Base.metadata.create_all(engine)
+    with SessionLocal.begin() as db:
+        if db.scalar(select(func.count()).select_from(Run)) == 0 and inspect(engine).has_table("projects"):
+            for p in db.scalars(select(Project)):
+                db.add(Run(id=f"legacy{p.id}", requirement=p.requirement, status="done",
+                           report=p.report, created_at=p.created_at, finished_at=p.created_at))
+        # Runs execute inside the server process, so any run that was still
+        # queued/running when the process stopped can never finish.
+        db.execute(
+            update(Run)
+            .where(Run.status.not_in(FINISHED))
+            .values(status="failed", error="Interrupted by a server restart.", finished_at=_utcnow())
+        )
 
 
-def save_project(requirement, report):
-    """Ek naya project (requirement + report) DB mein save karo. id wapas do."""
-    db = SessionLocal()
-    try:
-        project = Project(requirement=requirement, report=report)
-        db.add(project)       # session mein add karo
-        db.commit()           # disk par pakka save (commit)
-        db.refresh(project)   # naya id le aao
-        return project.id
-    finally:
-        db.close()            # session band — resource leak na ho
+def create_run(run_id, requirement):
+    with SessionLocal.begin() as db:
+        db.add(Run(id=run_id, requirement=requirement, status="queued"))
 
 
-def list_projects():
-    """Saare projects ki choti list (naye pehle). Report ke bina (list halki rahe)."""
-    db = SessionLocal()
-    try:
-        rows = db.query(Project).order_by(Project.created_at.desc()).all()
-        return [
-            {"id": r.id, "requirement": r.requirement, "created_at": str(r.created_at)}
-            for r in rows
-        ]
-    finally:
-        db.close()
+def update_run(run_id, **fields):
+    """Set any of: status, error, report. Finishing statuses also stamp finished_at."""
+    if fields.get("status") in FINISHED:
+        fields["finished_at"] = _utcnow()
+    with SessionLocal.begin() as db:
+        db.execute(update(Run).where(Run.id == run_id).values(**fields))
 
 
-def get_project(project_id):
-    """Ek project ki poori detail (report ke saath) id se nikaalo."""
-    db = SessionLocal()
-    try:
-        r = db.get(Project, project_id)
+def get_run(run_id):
+    """One run with its full report, or None."""
+    with SessionLocal() as db:
+        r = db.get(Run, run_id)
         if not r:
             return None
         return {
             "id": r.id,
             "requirement": r.requirement,
-            "report": r.report,
-            "created_at": str(r.created_at),
+            "status": r.status,
+            "error": r.error,
+            "result": r.report,
+            "created_at": _iso(r.created_at),
+            "finished_at": _iso(r.finished_at),
         }
-    finally:
-        db.close()
+
+
+def list_runs(limit=20, offset=0):
+    """Newest first, without the (large) report column."""
+    with SessionLocal() as db:
+        total = db.scalar(select(func.count()).select_from(Run))
+        rows = db.execute(
+            select(Run.id, Run.requirement, Run.status, Run.created_at)
+            .order_by(Run.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+    return {
+        "items": [
+            {"id": r.id, "requirement": r.requirement, "status": r.status, "created_at": _iso(r.created_at)}
+            for r in rows
+        ],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }

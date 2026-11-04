@@ -1,23 +1,31 @@
 # ============================================================
 #  docker-compose: backend + frontend dono ek saath chalata hai
 #  Chalane ke liye:  docker compose up --build
+#  App: http://localhost:3000   API: http://localhost:8000/docs
 # ============================================================
 
 services:
   # ---- Backend (Python FastAPI) ----
   backend:
-    build: ./backend                # backend/Dockerfile use karo
+    build: ./backend
     ports:
-      - "8000:8000"                 # host:container — browser localhost:8000 se pahunchega
+      - "8000:8000"
     env_file:
       - ./backend/.env              # GEMINI_API_KEY yahan se aayegi (image mein bake nahi hoti)
+    volumes:
+      - backend-data:/data          # SQLite history: survives rebuilds and restarts
     restart: unless-stopped
+    # healthcheck is defined in backend/Dockerfile (GET /health)
 
   # ---- Frontend (React via nginx) ----
   frontend:
-    build: ./frontend               # frontend/Dockerfile use karo
+    build: ./frontend
     ports:
-      - "3000:80"                   # host 3000 -> container 80. App: http://localhost:3000
+      - "3000:80"
     depends_on:
-      - backend                     # pehle backend, phir frontend
+      backend:
+        condition: service_healthy  # start only once the API actually answers
     restart: unless-stopped
+
+volumes:
+  backend-data:
