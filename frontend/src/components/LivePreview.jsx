@@ -17,6 +17,10 @@ function withCsp(html) {
     : `${meta}${html}`
 }
 
+// The model sometimes wraps the document in a ```html fence; the server strips
+// it from the final HTML, so hide it from the live stream too
+const stripFence = (text) => text.replace(/^\s*```[a-z]*\s*\n?/i, '').replace(/\n?```\s*$/, '')
+
 const DEVICES = [
   { key: 'desktop', label: 'Desktop', width: '100%' },
   { key: 'tablet', label: 'Tablet', width: '768px' },
@@ -57,7 +61,7 @@ export default function LivePreview({ html, streaming }) {
       </div>
       {live || showCode ? (
         <SyntaxHighlighter language="markup" style={oneDark} customStyle={codeStyle} codeTagProps={codeTagProps}>
-          {(live ? streaming : html) + (live ? '▍' : '')}
+          {live ? stripFence(streaming) + '▍' : html}
         </SyntaxHighlighter>
       ) : (
         <div className="preview-stage">

@@ -1,16 +1,15 @@
-# React + Vite
+# dev.assistant: frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React + Vite UI for the multi-agent dev assistant. Setup, architecture and
+design decisions are in the [main README](../readme.md).
 
-Currently, two official plugins are available:
+```bash
+npm ci
+npm run dev      # talks to the backend at http://localhost:8000 (override with VITE_API_URL)
+npm run lint
+npm run build
+```
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+Layout: `src/App.jsx` (run lifecycle), `src/runEvents.js` (SSE events -> UI
+state), `src/components/` (pipeline graph, tabs, preview, history, ...),
+`src/index.css` (design tokens for the light and dark themes).
