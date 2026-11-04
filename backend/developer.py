@@ -24,12 +24,18 @@ Rules:
 """
 
 
-async def write_code(task, language="JavaScript (Node.js + Express)", standards=None, design_context=None):
+def _standards_block(standards, heading):
+    rules = "\n".join(standards) if isinstance(standards, list) else standards
+    return f"\n\n--- {heading} ---\n{rules}"
+
+
+async def write_code(task, language="JavaScript (Node.js + Express)", standards=None, design_context=None, on_text=None):
     """
     Ek task (text) le kar validated CodeOutput (language, filename, code, notes) return karta hai.
     design_context = (optional) Architect ka design (text) — code isse consistent rahe.
     standards = (optional) company coding rules ki list — RAG se aati hai.
                 Di gayi to code unhe FOLLOW karega.
+    on_text = (optional) streaming callback (raw JSON text so far)
     """
     prompt = f"Task: {task}\n\nIska code {language} mein likho."
     if design_context:
@@ -37,13 +43,29 @@ async def write_code(task, language="JavaScript (Node.js + Express)", standards=
 
     # Agar company standards diye gaye hain to unhe prompt mein jod do (yahi RAG ka 'Augmented' hai)
     if standards:
-        rules = "\n".join(standards) if isinstance(standards, list) else standards
-        prompt += (
-            "\n\n--- COMPANY CODING STANDARDS (inhe ZAROOR follow karo) ---\n"
-            + rules
-        )
+        prompt += _standards_block(standards, "COMPANY CODING STANDARDS (inhe ZAROOR follow karo)")
 
-    return await ask_gemini_structured(prompt, CodeOutput, system_instruction=DEVELOPER_ROLE)
+    return await ask_gemini_structured(prompt, CodeOutput, system_instruction=DEVELOPER_ROLE, on_text=on_text)
+
+
+async def revise_code(current, instructions, design_context=None, standards=None, on_text=None):
+    """
+    Ek existing file (CodeOutput ya uska dict) ko diye gaye instructions ke hisaab
+    se badalta hai — review findings fix karne (self-correction) aur user ke
+    follow-up (refine) dono ke liye. Poori updated file return karta hai.
+    """
+    c = current if isinstance(current, dict) else current.model_dump()
+    prompt = (
+        f"Yeh existing file hai: {c['filename']} ({c['language']})\n\n{c['code']}\n\n"
+        f"--- IS FILE MEIN YE CHANGES KARO ---\n{instructions}\n\n"
+        "Sirf yahi changes karo; baaki behaviour, naam aur structure same rakho. "
+        "Poori updated file do (same filename aur language). `notes` mein 1-2 line mein batao kya badla."
+    )
+    if design_context:
+        prompt += f"\n\n--- PROJECT DESIGN (isse consistent raho) ---\n{design_context}"
+    if standards:
+        prompt += _standards_block(standards, "COMPANY CODING STANDARDS (inhe ZAROOR follow karo)")
+    return await ask_gemini_structured(prompt, CodeOutput, system_instruction=DEVELOPER_ROLE, on_text=on_text)
 
 
 if __name__ == "__main__":

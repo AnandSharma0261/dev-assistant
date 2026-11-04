@@ -16,9 +16,8 @@ def api_error(code, status="ERROR"):
     return cls(code, {"error": {"code": code, "message": "boom", "status": status}})
 
 
-class Resp:
-    def __init__(self, text):
-        self.text = text
+def Resp(text):
+    return gemini_helper._Result(text, None)
 
 
 @pytest.fixture
@@ -26,7 +25,7 @@ def calls(monkeypatch):
     """Script the model call: a list of exceptions/texts consumed in order."""
     script, seen = [], []
 
-    async def fake_call(model, prompt, config):
+    async def fake_call(model, prompt, config, on_text=None):
         seen.append(model)
         item = script.pop(0)
         if isinstance(item, BaseException):

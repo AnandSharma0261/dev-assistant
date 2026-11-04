@@ -8,7 +8,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     # SQLite lives on a mounted volume (see docker-compose), so history survives redeploys
-    DATABASE_URL=sqlite:////data/app.db
+    DATABASE_URL=sqlite:////data/app.db \
+    # Uploaded coding standards live on the volume too
+    DATA_DIR=/data
 
 # Non-root user: if the app is ever compromised, it can't modify the image or system
 # (/app must be writable by it too: the RAG index is created in /app/chroma_db)

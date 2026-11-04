@@ -14,6 +14,11 @@
 #  - Every call has a timeout, so a hung request can't stall a run forever.
 #  - Callers get LLMUnavailable with a user-safe message; the raw provider
 #    error is logged, never shown to users.
+#  - Streaming: pass on_text to receive the text generated so far while the
+#    model writes (used to show code being typed). on_text("") means a retry
+#    started over.
+#  - Every call is recorded (agent, model, time, tokens, attempts) into the
+#    current run's metrics, if any.
 # ============================================================
 
 import asyncio
@@ -26,6 +31,8 @@ from dotenv import load_dotenv
 from pydantic import ValidationError
 from google import genai
 from google.genai import errors, types
+
+import metrics
 
 try:  # the SDK uses aiohttp for async calls when it's installed
     import aiohttp
@@ -77,15 +84,60 @@ def _backoff(attempt):
     return random.uniform(0, min(BACKOFF_CAP, BACKOFF_BASE * 2 ** attempt))
 
 
-async def _call(model, prompt, config):
+class _Result:
+    """What a call produced: full text plus token usage."""
+
+    def __init__(self, text, usage):
+        self.text = text
+        self.input_tokens = (getattr(usage, "prompt_token_count", None) or 0) if usage else 0
+        # Output = visible answer + any "thinking" tokens (both are billed as output)
+        self.output_tokens = (
+            (getattr(usage, "candidates_token_count", None) or 0)
+            + (getattr(usage, "thoughts_token_count", None) or 0)
+        ) if usage else 0
+
+
+async def _call(model, prompt, config, on_text=None):
+    async def run():
+        if on_text is None:
+            response = await client.aio.models.generate_content(model=model, contents=prompt, config=config)
+            return _Result(response.text, response.usage_metadata)
+        # Streaming: chunks arrive as the model writes; usage comes with the last ones
+        parts, usage = [], None
+        async for chunk in await client.aio.models.generate_content_stream(
+            model=model, contents=prompt, config=config
+        ):
+            if chunk.usage_metadata:
+                usage = chunk.usage_metadata
+            if chunk.text:
+                parts.append(chunk.text)
+                on_text("".join(parts))
+        return _Result("".join(parts), usage)
+
     async with _limiter:
-        return await asyncio.wait_for(
-            client.aio.models.generate_content(model=model, contents=prompt, config=config),
-            timeout=CALL_TIMEOUT,
-        )
+        # The timeout covers the whole call, including a stream
+        return await asyncio.wait_for(run(), timeout=CALL_TIMEOUT)
 
 
-async def _generate(prompt, system_instruction=None, schema=None):
+async def _generate(prompt, system_instruction=None, schema=None, on_text=None):
+    """Runs one LLM request (with retries/failover) and records it in the run's metrics."""
+    m = metrics.current()
+    start_ms = m.now_ms() if m else 0
+    state = {"attempts": 0, "model": None, "result": None}
+    try:
+        value = await _generate_with_retries(prompt, system_instruction, schema, on_text, state)
+    except BaseException:
+        if m:
+            m.record_call(start_ms=start_ms, model=state["model"], attempts=state["attempts"], ok=False)
+        raise
+    if m:
+        r = state["result"]
+        m.record_call(start_ms=start_ms, model=state["model"], attempts=state["attempts"], ok=True,
+                      input_tokens=r.input_tokens, output_tokens=r.output_tokens)
+    return value
+
+
+async def _generate_with_retries(prompt, system_instruction, schema, on_text, state):
     """
     Andar ka asli kaam karne wala function.
     - prompt              = humara sawaal
@@ -104,8 +156,13 @@ async def _generate(prompt, system_instruction=None, schema=None):
     for model in MODELS:
         transient = invalid = 0
         while True:
+            state["attempts"] += 1
+            state["model"] = model
+            if on_text and state["attempts"] > 1:
+                on_text("")   # a retry starts over: tell the listener to clear
             try:
-                response = await _call(model, prompt, config)
+                response = await _call(model, prompt, config, on_text)
+                state["result"] = response
                 if schema is None:
                     if not response.text:
                         raise ValueError("Empty response from model")
@@ -150,11 +207,12 @@ async def _generate(prompt, system_instruction=None, schema=None):
     raise LLMUnavailable("The AI service is unavailable right now. Please try again in a few minutes.")
 
 
-async def ask_gemini(prompt, system_instruction=None):
-    """Normal text jawab chahiye to ye use karo."""
-    return await _generate(prompt, system_instruction)
+async def ask_gemini(prompt, system_instruction=None, on_text=None):
+    """Normal text jawab chahiye to ye use karo. on_text => stream the text as it is written."""
+    return await _generate(prompt, system_instruction, on_text=on_text)
 
 
-async def ask_gemini_structured(prompt, schema, system_instruction=None):
-    """Structured output: returns a validated instance of the `schema` Pydantic model."""
-    return await _generate(prompt, system_instruction, schema=schema)
+async def ask_gemini_structured(prompt, schema, system_instruction=None, on_text=None):
+    """Structured output: returns a validated instance of the `schema` Pydantic model.
+    on_text => receive the raw JSON text as it streams."""
+    return await _generate(prompt, system_instruction, schema=schema, on_text=on_text)

@@ -16,13 +16,16 @@ from typing import Annotated
 from fastapi import FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # Apne agents/crew import karo
 from planner import make_plan
-from runs import RunFinished, TooManyRuns, runs, stream_events
+from runs import ParentNotDone, RunFinished, TooManyRuns, runs, stream_events
+from export import build_zip
+from crew import REFINE_TARGETS
 from gemini_helper import LLMUnavailable
 import rag
 
@@ -126,6 +129,19 @@ class RequirementIn(BaseModel):
     max_dev_tasks: int = Field(default=2, ge=1, le=5)   # Developer kitni tasks ka code likhe
 
 
+class RefineIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    instruction: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=2000)]
+    target: Literal[REFINE_TARGETS] = "preview"   # what to regenerate: the prototype or the code
+
+
+class StandardsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: Annotated[str, StringConstraints(max_length=rag.MAX_DOC_CHARS)]
+
+
 # ============================================================
 #  ENDPOINTS
 # ============================================================
@@ -208,3 +224,63 @@ async def run_events(run_id: RunId, request: Request, last_event_id: str | None 
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/runs/{run_id}/refine", status_code=202)
+async def refine(run_id: RunId, body: RefineIn):
+    """
+    Follow-up on a finished run ("make the buttons round"). Starts a new run that
+    reuses the parent's plan and design and regenerates only `target`
+    (preview: the prototype; code: every file, then a fresh review).
+    Stream it like any run: GET /runs/{new_id}/events.
+    """
+    try:
+        run = await runs.refine(run_id, body.instruction, body.target)
+    except ParentNotDone:
+        raise HTTPException(status_code=409, detail="Only a finished, successful run can be refined.")
+    except TooManyRuns:
+        raise HTTPException(status_code=429, detail="Too many runs in progress. Try again shortly.")
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    return ok({"run_id": run.id, "parent_id": run_id, "status": run.status})
+
+
+@app.get("/runs/{run_id}/download")
+def download(run_id: RunId):
+    """Everything a finished run produced, as a ZIP: src/, preview/, tests/, design.json, README.md."""
+    snapshot = runs.snapshot(run_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    if snapshot["status"] != "done" or not snapshot.get("result"):
+        raise HTTPException(status_code=409, detail="The run has not finished successfully.")
+    return Response(
+        content=build_zip(snapshot),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="dev-assistant-{run_id[:8]}.zip"'},
+    )
+
+
+# ---- Company coding standards (the RAG source) ----
+
+@app.get("/standards")
+def get_standards():
+    """The active standards document (built-in or uploaded) and the rules it was split into."""
+    return ok(rag.describe())
+
+
+@app.put("/standards")
+async def upload_standards(body: StandardsIn):
+    """
+    Replace the coding standards with your own Markdown/text document and re-index it.
+    Use "## Heading" per rule; end a heading with "[always]" for rules that apply to every file.
+    """
+    try:
+        return ok(await asyncio.to_thread(rag.set_custom_standards, body.content))
+    except rag.InvalidStandards as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.delete("/standards")
+async def reset_standards():
+    """Go back to the built-in standards."""
+    return ok(await asyncio.to_thread(rag.reset_standards))

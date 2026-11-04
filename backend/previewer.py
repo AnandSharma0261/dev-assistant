@@ -41,15 +41,30 @@ def extract_html(text):
     return match.group(0)
 
 
-async def build_prototype(requirement, plan=None, design=None):
-    """Requirement (+ optional plan, design) le kar ek self-contained HTML document (str) return karta hai."""
+async def build_prototype(requirement, plan=None, design=None, on_text=None):
+    """Requirement (+ optional plan, design) le kar ek self-contained HTML document (str) return karta hai.
+    on_text = (optional) streaming callback (text so far)."""
     prompt = f"Requirement:\n\n{requirement}"
     if plan:
         prompt += f"\n\n--- PLANNED TASKS ---\n{plan.as_prompt()}"
     if design:
         prompt += f"\n\n--- SYSTEM DESIGN (UI isse consistent ho) ---\n{design.as_prompt()}"
     prompt += "\n\nIska working prototype ek single HTML file mein banao."
-    return extract_html(await ask_gemini(prompt, system_instruction=PREVIEW_ROLE))
+    return extract_html(await ask_gemini(prompt, system_instruction=PREVIEW_ROLE, on_text=on_text))
+
+
+async def refine_prototype(html, instruction, requirement=None, on_text=None):
+    """Existing prototype + user ka follow-up instruction -> updated HTML document."""
+    prompt = ""
+    if requirement:
+        prompt += f"Original requirement:\n{requirement}\n\n"
+    prompt += (
+        f"Yeh current prototype hai:\n\n{html}\n\n"
+        f"--- USER KA CHANGE REQUEST ---\n{instruction}\n\n"
+        "Ye change karo aur poora updated HTML document do. Jo kaam kar raha hai use mat todo; "
+        "sab rules (single file, inline CSS/JS, no network, no storage) wahi rahenge."
+    )
+    return extract_html(await ask_gemini(prompt, system_instruction=PREVIEW_ROLE, on_text=on_text))
 
 
 if __name__ == "__main__":

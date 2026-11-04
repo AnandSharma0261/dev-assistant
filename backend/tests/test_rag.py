@@ -11,13 +11,13 @@ def titles(rules):
 
 def test_ingest_is_skipped_when_standards_unchanged():
     assert rag.ensure_ingested() is False
-    assert rag.status() == {"ready": True, "rules": 7}
+    assert rag.status() == {"ready": True, "rules": 7, "source": "default"}
 
 
 def test_chunking_drops_document_title():
     chunks = rag._chunk_text(rag._read_standards())
-    assert all(text.startswith("## ") for _, text in chunks)
-    assert "Security Rules" in [t for t, _ in chunks]
+    assert all(text.startswith("## ") for _, text, _ in chunks)
+    assert "Security Rules" in [t for t, _, _ in chunks]
 
 
 def test_relevant_topical_rule_is_retrieved():

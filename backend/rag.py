@@ -13,12 +13,16 @@
 #    only when they are actually relevant (cosine distance threshold).
 #  - ChromaDB's default embedding model runs LOCALLY, so embeddings
 #    don't use any Gemini quota.
+#  - Users can upload their own standards document (set_custom_standards).
+#    It is stored under DATA_DIR and replaces the built-in one until reset.
+#    A heading ending in "[always]" marks a rule that applies to every file.
 # ============================================================
 
 import hashlib
 import logging
 import os
 import re
+import threading
 
 import chromadb
 
@@ -28,8 +32,18 @@ logger = logging.getLogger(__name__)
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.getenv("CHROMA_PATH", os.path.join(BASE, "chroma_db"))
 STANDARDS_PATH = os.path.join(BASE, "standards", "coding_standards.md")
+DATA_DIR = os.getenv("DATA_DIR", BASE)
+CUSTOM_STANDARDS_PATH = os.path.join(DATA_DIR, "custom_standards.md")
 COLLECTION_NAME = "coding_standards"
-INDEX_VERSION = "2"   # bump when chunking/embedding settings change -> forces re-ingest
+INDEX_VERSION = "3"   # bump when chunking/embedding settings change -> forces re-ingest
+
+MAX_DOC_CHARS = 100_000
+MAX_RULES = 200
+ALWAYS_MARKER = re.compile(r"\s*\[always\]\s*$", re.IGNORECASE)
+
+# Re-indexing deletes and recreates the collection; searches must not run
+# in the middle of that. All index access goes through this lock.
+_lock = threading.RLock()
 
 # Section titles that apply to every file, whatever the task
 ALWAYS_ON = ("File Header Rule", "Naming Conventions", "Comments & Documentation")
@@ -52,28 +66,48 @@ def _read_standards(path=STANDARDS_PATH):
         return f.read()
 
 
+def active_standards():
+    """(text, source): the uploaded document if there is one, else the built-in one."""
+    if os.path.exists(CUSTOM_STANDARDS_PATH):
+        return _read_standards(CUSTOM_STANDARDS_PATH), "custom"
+    return _read_standards(STANDARDS_PATH), "default"
+
+
 def _source_hash(text):
     return hashlib.sha256((INDEX_VERSION + text).encode()).hexdigest()
 
 
 def _chunk_text(text):
     """
-    Split into one chunk per "## " section. The document title / preamble
-    before the first section is dropped. Returns [(title, chunk_text)].
+    Split into one chunk per "## " section (the title/preamble before the first
+    section is dropped). A document without "## " sections is split into
+    paragraphs instead. Returns [(title, chunk_text, always_on)].
     """
-    sections = re.split(r"(?m)^(?=## )", text)
     chunks = []
-    for s in sections:
-        s = s.strip()
-        if s.startswith("## "):
-            title = s.splitlines()[0][3:].strip()
-            chunks.append((title, s))
+    sections = [s.strip() for s in re.split(r"(?m)^(?=## )", text)]
+    sections = [s for s in sections if s.startswith("## ")]
+    if sections:
+        for s in sections:
+            heading = s.splitlines()[0][3:].strip()
+            always = bool(ALWAYS_MARKER.search(heading))
+            title = ALWAYS_MARKER.sub("", heading).strip() or "Untitled"
+            chunks.append((title, s, always or title in ALWAYS_ON))
+    else:
+        for para in re.split(r"\n\s*\n", text):
+            para = para.strip()
+            if para:
+                title = para.splitlines()[0].lstrip("#-* ").strip()[:60] or "Rule"
+                chunks.append((title, para, False))
     return chunks
 
 
-def ingest_standards(path=STANDARDS_PATH):
-    """Standards file padho -> chunks banao -> ChromaDB mein (fresh) daalo."""
-    text = _read_standards(path)
+def ingest_standards(text=None):
+    """Standards text (default: the active document) -> chunks -> ChromaDB (fresh)."""
+    with _lock:
+        return _ingest(text if text is not None else active_standards()[0])
+
+
+def _ingest(text):
     chunks = _chunk_text(text)
     client = _get_client()
 
@@ -91,37 +125,81 @@ def ingest_standards(path=STANDARDS_PATH):
     # add() khud har chunk ko embedding (vector) mein badal kar store karta hai
     collection.add(
         ids=[f"rule-{i}" for i in range(len(chunks))],
-        documents=[c for _, c in chunks],
-        metadatas=[{"title": t, "always_on": t in ALWAYS_ON} for t, _ in chunks],
+        documents=[c for _, c, _ in chunks],
+        metadatas=[{"title": t, "always_on": a} for t, _, a in chunks],
     )
-    missing = set(ALWAYS_ON) - {t for t, _ in chunks}
-    if missing:
-        logger.warning("ALWAYS_ON sections not found in standards file: %s", sorted(missing))
     return len(chunks)
 
 
 def ensure_ingested():
     """Ingest only if the index is missing or the standards file changed. Returns True if it ingested."""
-    expected = _source_hash(_read_standards())
-    try:
-        collection = _get_client().get_collection(name=COLLECTION_NAME)
-        if (collection.metadata or {}).get("source_hash") == expected and collection.count() > 0:
-            logger.info("RAG index up to date (%d rules)", collection.count())
-            return False
-    except Exception:
-        pass  # collection doesn't exist yet
-    count = ingest_standards()
-    logger.info("RAG index built (%d rules)", count)
-    return True
+    with _lock:
+        text, source = active_standards()
+        expected = _source_hash(text)
+        try:
+            collection = _get_client().get_collection(name=COLLECTION_NAME)
+            if (collection.metadata or {}).get("source_hash") == expected and collection.count() > 0:
+                logger.info("RAG index up to date (%d rules, %s standards)", collection.count(), source)
+                return False
+        except Exception:
+            pass  # collection doesn't exist yet
+        count = _ingest(text)
+        logger.info("RAG index built (%d rules, %s standards)", count, source)
+        return True
+
+
+class InvalidStandards(ValueError):
+    """The uploaded document can't be used. Message is safe to show users."""
+
+
+def set_custom_standards(text):
+    """Validate, store and index an uploaded standards document. Returns describe()."""
+    text = (text or "").strip()
+    if not text:
+        raise InvalidStandards("The document is empty.")
+    if len(text) > MAX_DOC_CHARS:
+        raise InvalidStandards(f"The document is too long (max {MAX_DOC_CHARS:,} characters).")
+    if "\x00" in text:
+        raise InvalidStandards("The document must be plain text or Markdown.")
+    chunks = _chunk_text(text)
+    if len(chunks) > MAX_RULES:
+        raise InvalidStandards(f"Too many rules ({len(chunks)}); the limit is {MAX_RULES}.")
+    with _lock:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(CUSTOM_STANDARDS_PATH, "w", encoding="utf-8") as f:
+            f.write(text)
+        ensure_ingested()
+    return describe()
+
+
+def reset_standards():
+    """Go back to the built-in standards document."""
+    with _lock:
+        if os.path.exists(CUSTOM_STANDARDS_PATH):
+            os.remove(CUSTOM_STANDARDS_PATH)
+        ensure_ingested()
+    return describe()
+
+
+def describe():
+    """Which document is active and the rules it was split into."""
+    with _lock:
+        text, source = active_standards()
+        return {
+            "source": source,
+            "rules": [{"title": t, "always_on": a} for t, _, a in _chunk_text(text)],
+            "content": text,
+        }
 
 
 def status():
     """Small health summary: is the index there, and how many rules does it hold."""
-    try:
-        count = _get_client().get_collection(name=COLLECTION_NAME).count()
-        return {"ready": count > 0, "rules": count}
-    except Exception:
-        return {"ready": False, "rules": 0}
+    with _lock:
+        try:
+            count = _get_client().get_collection(name=COLLECTION_NAME).count()
+            return {"ready": count > 0, "rules": count, "source": active_standards()[1]}
+        except Exception:
+            return {"ready": False, "rules": 0, "source": active_standards()[1]}
 
 
 def search_standards(query, n=TOP_K, max_distance=MAX_DISTANCE):
@@ -131,6 +209,11 @@ def search_standards(query, n=TOP_K, max_distance=MAX_DISTANCE):
     Raises if the index is missing, so a broken RAG fails loudly instead of
     silently producing code without the standards.
     """
+    with _lock:
+        return _search(query, n, max_distance)
+
+
+def _search(query, n, max_distance):
     collection = _get_client().get_collection(name=COLLECTION_NAME)
 
     always = collection.get(where={"always_on": True})
