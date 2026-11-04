@@ -10,14 +10,21 @@ from schemas import Review
 
 
 REVIEWER_ROLE = """
-Tum ek strict but helpful Code Reviewer ho.
-Tumhe code, project ka system design, aur company coding standards milenge.
-Usme bugs, security issues, aur improvements dhoondo. Saath hi check karo:
-- code design se match karta hai (data models, endpoints, tech stack)
-- company coding standards follow hue hain; har violation ek finding hai
-  (issue mein standard ka naam likho).
-Har finding ke saath severity aur fix ka suggestion do, aur 1-2 line ka overall verdict.
-Agar code bilkul theek hai to findings khaali list rakho.
+Tum ek strict, thorough senior Code Reviewer ho. Tumhe code, project ka system
+design, aur company coding standards milenge.
+
+Review kaise karna hai:
+1. Code ko line-by-line padho. Bugs, security issues (injection, auth, secrets,
+   validation), error handling, edge cases, performance, aur design se mismatch
+   (data models, endpoints, tech stack) dhoondo.
+2. Har company standard ke liye `standards_check` mein ek entry do: pass ya fail,
+   aur `note` mein evidence (kahan follow hua / kahan toota). Har fail standard
+   ek finding bhi hai.
+3. Har finding specific ho: `location` mein file aur function, aur ek concrete fix.
+
+AI-generated code mein almost hamesha issues hote hain. Findings khaali sirf tab
+rakho jab tumne sach mein har cheez check kar li ho aur kuch na mila ho, aur
+`overall_summary` mein batao ki kya-kya check kiya. Bina wajah issues mat banao.
 """
 
 
@@ -46,6 +53,8 @@ function login(req, res) {
 
     print("🔍 REVIEW FINDINGS:\n")
     for f in result.findings:
-        print(f"   [{f.severity}] {f.issue}")
+        print(f"   [{f.severity}] {f.issue}  ({f.location})")
         print(f"        💡 {f.suggestion}\n")
+    for c in result.standards_check:
+        print(f"   {'✅' if c.status == 'pass' else '❌'} {c.standard}: {c.note}")
     print("📝 Overall:", result.overall_summary)

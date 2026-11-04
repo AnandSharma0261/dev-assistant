@@ -3,11 +3,12 @@
 #  Kaam: ek task le kar uska ACTUAL CODE likhna
 # ============================================================
 
-# Yahan ask_gemini (normal text) use kar rahe hain, JSON nahi —
-# kyunki code ek text hota hai, use seedha padhna aasaan hai.
+# Structured output: language + filename + code + notes, so the UI can
+# highlight the right language and show a real file name (no regex on fences).
 import asyncio
 
-from gemini_helper import ask_gemini
+from gemini_helper import ask_gemini_structured
+from schemas import CodeOutput
 
 
 DEVELOPER_ROLE = """
@@ -18,14 +19,14 @@ tech stack se match kare (naam, fields, paths wahi rakho).
 
 Rules:
 - Saaf, readable code likho with short helpful comments.
-- Agar koi assumption le rahe ho to code ke upar 1-2 line mein likh do.
-- Sirf code aur zaroori chhoti explanation do, faltu baatein nahi.
+- Ek task = ek main file. `code` mein poori file ho, markdown fences (```) nahi.
+- Assumptions ya chalane ka tareeka `notes` mein 1-2 line mein likho.
 """
 
 
 async def write_code(task, language="JavaScript (Node.js + Express)", standards=None, design_context=None):
     """
-    Ek task (text) le kar uska code (text) return karta hai.
+    Ek task (text) le kar validated CodeOutput (language, filename, code, notes) return karta hai.
     design_context = (optional) Architect ka design (text) — code isse consistent rahe.
     standards = (optional) company coding rules ki list — RAG se aati hai.
                 Di gayi to code unhe FOLLOW karega.
@@ -42,12 +43,12 @@ async def write_code(task, language="JavaScript (Node.js + Express)", standards=
             + rules
         )
 
-    return await ask_gemini(prompt, system_instruction=DEVELOPER_ROLE)
+    return await ask_gemini_structured(prompt, CodeOutput, system_instruction=DEVELOPER_ROLE)
 
 
 if __name__ == "__main__":
     task = "Ek API endpoint banao jo user signup kare: email aur password le, password ko hash kare, aur database mein save kare."
     print("⏳ Developer Agent code likh raha hai...\n")
-    code = asyncio.run(write_code(task))
-    print("👨‍💻 Developer Agent ka code:\n")
-    print(code)
+    out = asyncio.run(write_code(task))
+    print(f"👨‍💻 {out.filename} ({out.language}) — {out.notes}\n")
+    print(out.code)
