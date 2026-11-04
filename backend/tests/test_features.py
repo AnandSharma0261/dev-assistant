@@ -319,3 +319,40 @@ def test_standards_upload_needs_the_admin_token(client, monkeypatch):
     assert client.put("/standards", json={"content": CUSTOM}, headers={"X-Admin-Token": "wrong"}).status_code == 401
     assert client.delete("/standards").status_code == 401
     assert rag.status()["source"] == "default"
+
+
+# ---- preview must be self-contained (the sandbox blocks the network) ----
+
+TAILWIND = '<!DOCTYPE html><html><head><script src="https://cdn.tailwindcss.com"></script></head><body class="hidden">x</body></html>'
+CLEAN = "<!DOCTYPE html><html><head><style>body{color:red}</style></head><body>x</body></html>"
+
+
+def test_preview_with_external_files_is_regenerated(fake_llm):
+    fake_llm.preview_queue = [TAILWIND, CLEAN]
+    result, events = run_crew()
+    assert result["preview"]["html"] == CLEAN
+    assert len(fake_llm.prompts["Preview"]) == 2
+    assert "cdn.tailwindcss.com" in fake_llm.prompts["Preview"][1]          # the retry names the problem
+    deltas = [e["data"] for e in events if e["stage"] == "preview" and e["status"] == "delta"]
+    assert {"reset": True} in deltas                                        # client clears the first attempt
+    assert rebuild(events, "preview") == CLEAN
+
+
+def test_preview_keeps_first_answer_if_retry_is_no_better(fake_llm):
+    fake_llm.preview_queue = [TAILWIND, TAILWIND]
+    result, _ = run_crew()
+    assert result["preview"]["html"] == TAILWIND   # UI shows a warning + one-click fix
+    assert len(fake_llm.prompts["Preview"]) == 2
+
+
+def test_clean_preview_is_not_regenerated(fake_llm):
+    run_crew()
+    assert len(fake_llm.prompts["Preview"]) == 1
+
+
+def test_external_resource_detection():
+    from previewer import external_resources
+    html = ('<script src="https://cdn.tailwindcss.com"></script><link href="//fonts.googleapis.com/x" rel=stylesheet>'
+            '<style>@import url("https://a.com/b.css"); .x{background:url(data:image/png;base64,AA)}</style>'
+            '<script src="local.js"></script><a href="https://example.com">ok</a>')
+    assert external_resources(html) == ["https://cdn.tailwindcss.com", "//fonts.googleapis.com/x", "https://a.com/b.css"]

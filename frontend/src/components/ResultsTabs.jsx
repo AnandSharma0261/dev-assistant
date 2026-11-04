@@ -205,7 +205,14 @@ export default function ResultsTabs({ data, streams, devTasks, stages, runId, bu
 
         {active === 'preview' && activeTab.ready && (
           <>
-            <LivePreview html={data.preview?.html} streaming={streams.preview} />
+            <LivePreview
+              html={data.preview?.html}
+              streaming={streams.preview}
+              onFixExternal={canRefine ? () => onRefine(
+                'Saari external CSS/JS files (Tailwind, CDN, Google Fonts) hata do aur wahi design plain CSS mein <style> ke andar likho, taaki sandbox mein bina network ke sahi dikhe aur kaam kare.',
+                'preview',
+              ) : undefined}
+            />
             {(canRefine || refineHistory.length > 0) && (
               <RefinePanel key="preview" initialTarget="preview" onRefine={onRefine} disabled={!canRefine} history={refineHistory} />
             )}
