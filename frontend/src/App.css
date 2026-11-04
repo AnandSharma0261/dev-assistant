@@ -205,3 +205,18 @@
   margin-bottom: 8px;
 }
 .code-block:last-child { margin-bottom: 0; }
+
+/* ---- Live preview ---- */
+.preview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.preview-head h2 { margin: 0; }
+.preview-actions { display: flex; gap: 8px; }
+.preview-frame {
+  display: block;
+  width: 100%;
+  height: 520px;
+  margin-top: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: #fff;   /* generated apps assume a normal page background */
+}
+.preview-note { font-size: 12px; margin-top: 8px; }

@@ -5,10 +5,12 @@
 #
 #  Dependency graph (what each agent needs decides what can run in parallel):
 #
-#    Planner ──▶ Architect ──▶ Developer × N ──┬──▶ Reviewer
-#   (requirement) (+plan)    (parallel; task + │   (code + design + standards)
-#                             design + RAG)    └──▶ QA
-#                                                  (plan + endpoints + code)
+#    Planner ──▶ Architect ──┬─▶ Developer × N ──┬──▶ Reviewer
+#   (requirement) (+plan)    │  (parallel; task + │   (code + design + standards)
+#                            │   design + RAG)    └──▶ QA
+#                            │                        (plan + endpoints + code)
+#                            └─▶ Preview (runnable single-file HTML prototype;
+#                                 alongside the Developers, non-fatal on failure)
 #
 #  Architect waits for the plan so the design covers every task (a
 #  deliberate trade: better context over running it alongside the Planner).
@@ -26,6 +28,7 @@ from architect import design_system
 from developer import write_code
 from reviewer import review_code
 from qa import generate_tests
+from previewer import build_prototype
 from rag import search_standards  # Phase 5: company coding standards dhoondne ke liye
 
 
@@ -62,10 +65,8 @@ async def run_crew(requirement, max_dev_tasks=2, on_event=None):
     stage("architect", "done", design.model_dump())
     print(f"     ✅ Design ready (backend: {backend_lang})")
 
-    # ---------- STEP 3: DEVELOPER × N (parallel) ----------
+    # ---------- STEP 3: DEVELOPER × N  ∥  PREVIEW (all parallel) ----------
     dev_tasks = plan.tasks[:max_dev_tasks]
-    print(f"👨‍💻 Developer: {len(dev_tasks)} tasks ka code parallel mein likh raha hai...")
-    stage("developer", "started", {"total": len(dev_tasks)})
 
     async def develop(t):
         # RAG lookup is local CPU work (embeddings), so keep it off the event loop
@@ -81,13 +82,35 @@ async def run_crew(requirement, max_dev_tasks=2, on_event=None):
         print(f"     ✅ '{t.title}' ka code ban gaya ({len(standards)} standards ke saath)")
         return output, standards
 
-    # TaskGroup (not gather): if one task fails, the others are cancelled
-    # instead of running on and burning quota for a run that already failed.
+    async def run_developers():
+        print(f"👨‍💻 Developer: {len(dev_tasks)} tasks ka code parallel mein likh raha hai...")
+        stage("developer", "started", {"total": len(dev_tasks)})
+        # TaskGroup (not gather): if one task fails, the others are cancelled
+        # instead of running on and burning quota for a run that already failed.
+        async with asyncio.TaskGroup() as tg:
+            jobs = [tg.create_task(develop(t)) for t in dev_tasks]
+        stage("developer", "done")
+        return [job.result() for job in jobs]   # keeps the plan's task order
+
+    async def run_preview():
+        # Needs only plan + design, so it runs alongside the Developers.
+        # A nice-to-have: if it fails, the run still completes without a preview.
+        stage("preview", "started")
+        try:
+            html = await build_prototype(requirement, plan=plan, design=design)
+        except Exception as e:
+            print(f"     ⚠️  Preview nahi bana: {e}")
+            stage("preview", "failed", {"message": "Preview could not be generated."})
+            return None
+        stage("preview", "done", {"html": html})
+        print(f"     ✅ Preview ready ({len(html)} chars)")
+        return {"html": html}
+
     async with asyncio.TaskGroup() as tg:
-        dev_jobs = [tg.create_task(develop(t)) for t in dev_tasks]
-    results = [job.result() for job in dev_jobs]
-    dev_outputs = [out for out, _ in results]   # gather keeps the plan's task order
-    stage("developer", "done")
+        devs_job = tg.create_task(run_developers())
+        preview_job = tg.create_task(run_preview())
+    results, preview = devs_job.result(), preview_job.result()
+    dev_outputs = [out for out, _ in results]
 
     # Every standard any Developer was given — the Reviewer checks compliance with them
     used_standards = list(dict.fromkeys(rule for _, rules in results for rule in rules))
@@ -120,6 +143,7 @@ async def run_crew(requirement, max_dev_tasks=2, on_event=None):
         "plan": plan.model_dump(),
         "design": design.model_dump(),
         "dev_outputs": dev_outputs,
+        "preview": preview,
         "review": review.model_dump(),
         "tests": tests.model_dump(),
     }
